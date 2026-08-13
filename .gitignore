@@ -1,0 +1,13 @@
+/target
+/result
+result-*
+*.pcap
+
+# Proprietary vendor artifacts (reference only, not part of the build)
+/avctKVM.jar
+/libavctKVMIO.so
+/libavmlinux.so
+frames.bin
+/decoder-tables.txt
+*.ppm
+*.png
