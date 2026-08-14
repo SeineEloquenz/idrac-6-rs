@@ -59,10 +59,24 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(xml[start..end].trim())
 }
 
+/// A login failure the caller can act on. The web UI maps each to an HTTP status; everything
+/// that is not a distinct iDRAC verdict (network, jnlp, parsing) stays an opaque `Other`.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("maximum iDRAC sessions reached; wait for old sessions to time out or clear them, then retry")]
+    MaxSessions,
+    #[error("this account lacks the 'Login to iDRAC' privilege")]
+    NoPrivilege,
+    #[error("wrong username or password")]
+    BadCredentials,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// Log into the iDRAC web UI (`POST /data/login`) and return the session cookies plus the
 /// `ST1` token from the forward URL. This is what "Launch Virtual Console" does before the
 /// appliance will mint a KVM token.
-pub async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(String, String)>, Option<String>)> {
+pub async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(String, String)>, Option<String>), AuthError> {
     let body = format!("user={user}&password={password}");
     let resp = http::request(
         host,
@@ -78,13 +92,9 @@ pub async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(S
     let text = resp.body_str();
     match xml_tag(&text, "authResult") {
         Some("0") => {}
-        Some("5") => bail!(
-            "iDRAC login failed: maximum sessions reached (authResult=5). Old sessions from \
-             earlier runs are still open; wait for them to time out or terminate them in the \
-             iDRAC web UI, then retry."
-        ),
-        Some("3") => bail!("iDRAC login failed: user lacks the 'Login to iDRAC' privilege (authResult=3)"),
-        other => bail!("iDRAC login failed: wrong username/password (authResult={other:?})"),
+        Some("5") => return Err(AuthError::MaxSessions),
+        Some("3") => return Err(AuthError::NoPrivilege),
+        _ => return Err(AuthError::BadCredentials),
     }
     let st1 = xml_tag(&text, "forwardUrl")
         .and_then(|u| u.split("ST1=").nth(1))
@@ -125,7 +135,7 @@ pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st
 
 /// Full self-service flow: web login with account credentials, mint + parse the jnlp token.
 /// The returned session carries the web cookies/ST1 so the caller can [`web_logout`].
-pub async fn login_and_get_token(host: &str, user: &str, password: &str) -> Result<Session> {
+pub async fn login_and_get_token(host: &str, user: &str, password: &str) -> Result<Session, AuthError> {
     let (cookies, st1) = web_login(host, user, password).await?;
     info!(cookies = cookies.len(), st1 = st1.is_some(), "web login ok");
     let jnlp = fetch_jnlp(host, user, &cookies, st1.as_deref()).await?;
