@@ -170,35 +170,7 @@ async fn main() -> Result<()> {
 /// Reassemble hb fragments from a capture dump and decode to a PPM (offline decoder dev).
 fn decode_dump(a: DecodeArgs) -> Result<()> {
     let raw = std::fs::read(&a.input).with_context(|| format!("read {}", a.input.display()))?;
-    // Split into packets (u32-LE length + body), keep the deadbeef video ones, reassemble
-    // fragments by flags (bit0=first, bit1=last) into full frame payloads.
-    let mut frames: Vec<(u16, u16, Vec<u8>)> = Vec::new();
-    let mut cur: Vec<u8> = Vec::new();
-    let mut dims = (0u16, 0u16);
-    let mut off = 0;
-    while off + 4 <= raw.len() {
-        let len = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
-        off += 4;
-        if off + len > raw.len() {
-            break;
-        }
-        let body = &raw[off..off + len];
-        off += len;
-        if body.len() < 12 || &body[0..4] != b"\xde\xad\xbe\xef" {
-            continue;
-        }
-        let h = u16::from_be_bytes([body[4], body[5]]);
-        let w = u16::from_be_bytes([body[6], body[7]]);
-        let flags = body[8];
-        if flags & 1 != 0 {
-            cur.clear();
-            dims = (w, h);
-        }
-        cur.extend_from_slice(&body[12..]);
-        if flags & 2 != 0 {
-            frames.push((dims.1, dims.0, std::mem::take(&mut cur)));
-        }
-    }
+    let frames = reassemble(&raw);
     info!(reassembled = frames.len(), "frames");
     let Some((_, _, first)) = frames.first() else {
         anyhow::bail!("no video frames in {}", a.input.display());
