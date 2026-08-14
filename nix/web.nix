@@ -1,17 +1,17 @@
 self:
 { config, lib, pkgs, ... }:
 let
-  cfg = config.services.idrac6-kvm;
+  cfg = config.services.idrac6-kvm-web;
 in
 {
-  options.services.idrac6-kvm = {
+  options.services.idrac6-kvm-web = {
     enable = lib.mkEnableOption "iDRAC 6 KVM web console (browser login + noVNC)";
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.system}.default;
-      defaultText = lib.literalExpression "idrac6-kvm.packages.\${system}.default";
-      description = "The idrac6-kvm package to run.";
+      default = self.packages.${pkgs.system}.web;
+      defaultText = lib.literalExpression "idrac6-kvm.packages.\${system}.web";
+      description = "The idrac6-kvm package to run (must include the `web` feature).";
     };
 
     host = lib.mkOption {
@@ -50,7 +50,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services.idrac6-kvm = {
+    systemd.services.idrac6-kvm-web = {
       description = "iDRAC 6 KVM web console";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
