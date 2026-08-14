@@ -2,7 +2,6 @@
 //! the KVM backend, and serves noVNC over an in-process RFB-over-WebSocket bridge. No secret is
 //! stored on the server: the iDRAC credentials entered in the browser are the only credential.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -12,13 +11,14 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Form, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
 };
+use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -110,10 +110,17 @@ async fn root(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     }
 }
 
-async fn login(State(st): State<Arc<AppState>>, body: String) -> Response {
-    let form = parse_form(&body);
-    let user = form.get("user").cloned().unwrap_or_else(|| st.default_user.clone());
-    let password = form.get("password").cloned().unwrap_or_default();
+#[derive(Deserialize)]
+struct LoginForm {
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    password: String,
+}
+
+async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
+    let user = if form.user.is_empty() { st.default_user.clone() } else { form.user };
+    let password = form.password;
 
     let session = match auth::login_and_get_token(&st.host, &user, &password).await {
         Ok(s) => s,
@@ -286,56 +293,6 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_form(body: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for pair in body.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        m.insert(url_decode(k), url_decode(v));
-    }
-    m
-}
-
-fn url_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < b.len() => match (hex_val(b[i + 1]), hex_val(b[i + 2])) {
-                (Some(h), Some(l)) => {
-                    out.push(h << 4 | l);
-                    i += 3;
-                }
-                _ => {
-                    out.push(b'%');
-                    i += 1;
-                }
-            },
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn random_token() -> String {
