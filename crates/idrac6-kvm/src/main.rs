@@ -322,7 +322,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
     // Keep the web-session handle for logout on shutdown (the KVM token is bound to it, so we
     // must not log out while streaming).
     let (host, cookies, st1) = (s.host.clone(), s.web_cookies.clone(), s.web_st1.clone());
-    let (shared, input, _task) = kvm::spawn(s);
+    // Reconnect by re-minting from the same web session (no-op for a --jnlp session with no ST1).
+    let user = a.conn.user.clone().unwrap_or_else(|| "root".into());
+    let refresh = kvm::refresh_from_web(host.clone(), user, cookies.clone(), st1.clone());
+    let (shared, input, _task) = kvm::spawn(refresh, s);
     info!(listen = %a.listen, "RFB server listening — point a VNC client here (Ctrl-C to stop)");
 
     // Serve until the RFB loop ends or a shutdown signal arrives, then always clean up.
