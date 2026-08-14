@@ -459,6 +459,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "idrac6-video",
  "openssl",
  "serde",
  "thiserror",
@@ -468,6 +469,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "idrac6-video"
+version = "0.1.0"
 
 [[package]]
 name = "is_terminal_polyfill"

@@ -1,18 +1,10 @@
-mod apcp;
-mod auth;
-mod http;
-mod kvm;
-mod rfb;
-mod tls;
-mod video;
-mod web;
-
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing::info;
 
-use apcp::ConnKind;
+use idrac6_kvm::apcp::{self, ConnKind};
+use idrac6_kvm::{auth, http, kvm, rfb, video};
 
 #[derive(Parser)]
 #[command(name = "idrac6-kvm", about = "Modern KVM console proxy for Dell iDRAC 6")]
@@ -28,6 +20,7 @@ enum Cmd {
     /// Run the full proxy: KVM session in, RFB/VNC server out.
     Serve(ServeArgs),
     /// Run the self-serve web UI: browser login (iDRAC creds) + noVNC, no stored secret.
+    #[cfg(feature = "web")]
     Web(WebArgs),
     /// Debug: issue one HTTPS GET over the legacy-TLS layer and print the response.
     Get(GetArgs),
@@ -130,6 +123,7 @@ struct ServeArgs {
     replay: Option<std::path::PathBuf>,
 }
 
+#[cfg(feature = "web")]
 #[derive(Args)]
 struct WebArgs {
     /// iDRAC hostname or IP. Credentials are entered in the browser, never stored here.
@@ -161,7 +155,8 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Capture(a) => capture(a).await,
         Cmd::Serve(a) => serve(a).await,
-        Cmd::Web(a) => web::run(a.host, a.user, a.listen, a.novnc_root, a.idle_timeout).await,
+        #[cfg(feature = "web")]
+        Cmd::Web(a) => idrac6_kvm::web::run(a.host, a.user, a.listen, a.novnc_root, a.idle_timeout).await,
         Cmd::Get(a) => {
             let r = http::request(&a.host, 443, "GET", &a.path, &[], None).await?;
             info!(status = r.status, cookies = ?r.cookies(), "response");
@@ -361,7 +356,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
     // Serve until the RFB loop ends or a shutdown signal arrives, then always clean up.
     let out = tokio::select! {
         r = rfb::serve(listener, shared, input) => r,
-        _ = shutdown_signal() => { info!("shutting down"); Ok(()) }
+        _ = idrac6_kvm::shutdown_signal() => { info!("shutting down"); Ok(()) }
     };
     if !cookies.is_empty() {
         info!("logging out iDRAC web session");
@@ -369,29 +364,6 @@ async fn serve(a: ServeArgs) -> Result<()> {
     }
     // Dropping here closes the KVM sockets, ending the appliance-side KVM session cleanly.
     out
-}
-
-/// Resolve on Ctrl-C (SIGINT) or SIGTERM.
-pub(crate) async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let term = async {
-        use tokio::signal::unix::{signal, SignalKind};
-        if let Ok(mut s) = signal(SignalKind::terminate()) {
-            s.recv().await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = term => {}
-    }
 }
 
 /// Reassemble hb fragments from a capture dump into (height, width, payload) frames.
