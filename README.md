@@ -23,10 +23,16 @@ Working end to end against a real R710:
 ## Build
 
 ```sh
-nix build            # -> ./result/bin/idrac6-kvm  (~3.5 MB)
+nix build            # -> ./result/bin/idrac6-kvm
 nix develop          # dev shell: cargo, rustc, openssl
 nix develop .#capture   # extra tools for the M0 capture spike (tigervnc, tshark)
+
+cargo build --no-default-features   # lean RFB/VNC proxy: drops the web UI + axum/tower/serde
 ```
+
+A Cargo workspace under `crates/`: `idrac6-kvm` (a library plus the thin CLI binary) and the pure,
+dependency-free video codec crate `idrac6-video`. The self-serve web UI is behind the default-on
+`web` feature; disable it for a smaller RFB-only proxy.
 
 ## Use
 
@@ -74,7 +80,7 @@ Front it with nginx/Caddy for TLS, e.g. `services.nginx.virtualHosts."kvm.exampl
 
 `serve` logs into the iDRAC web UI to mint a one-time KVM token, opens the APCP control
 channel (TLS) and authenticates, then opens the media channel and drives the video handshake.
-Incoming `hb` tiles are RLE/RGB555-decoded (`src/video/decoder.rs`, ported from the applet's
+Incoming `hb` tiles are RLE/RGB555-decoded (`crates/idrac6-video`, ported from the applet's
 `com/avocent/kvm/d/b.java` + `d/c.java`) into a shared framebuffer that the RFB server streams
 to clients. RFB key/pointer events are translated to APCP keyboard (`f`, type 512) and mouse
 (`gc`, type 513) packets.

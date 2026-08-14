@@ -1,9 +1,9 @@
 //! Legacy TLS for iDRAC 6.
 //!
-//! iDRAC 6 negotiates TLS 1.0 (sometimes SSLv3) with weak ciphers and a small,
-//! SHA1-signed self-signed certificate. Modern stacks (rustls, default OpenSSL 3)
-//! reject all of that, so we build an intentionally permissive OpenSSL connector:
-//! security level 0, TLS 1.0 floor, verification disabled.
+//! The appliance negotiates TLS 1.2, but its 1024-bit RSA certificate and 1024-bit DH parameters
+//! fall below OpenSSL 3's default SECLEVEL 1, which aborts the handshake with `dh key too small`.
+//! We build an intentionally permissive connector at security level 0 with a legacy cipher list
+//! and verification disabled.
 
 use std::pin::Pin;
 
@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 pub fn legacy_connector() -> Result<SslConnector> {
     let mut b = SslConnector::builder(SslMethod::tls()).context("SslConnector::builder")?;
     b.set_verify(SslVerifyMode::NONE);
-    // SECLEVEL 0 re-enables SHA1 certs, small RSA keys, and legacy ciphers.
+    // SECLEVEL 0 accepts the appliance's 1024-bit RSA key and 1024-bit DH params.
     b.set_security_level(0);
     b.set_min_proto_version(Some(SslVersion::TLS1)).ok();
     // Accept the broad legacy cipher set the appliance offers.
