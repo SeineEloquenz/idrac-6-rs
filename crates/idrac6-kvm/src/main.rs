@@ -55,7 +55,7 @@ struct ConnArgs {
     #[arg(long)]
     jnlp: Option<std::path::PathBuf>,
     /// iDRAC hostname or IP (ignored when --jnlp is given).
-    #[arg(long)]
+    #[arg(long, env = "IDRAC_HOST")]
     host: Option<String>,
     /// iDRAC username (defaults to root; ignored when --jnlp is given).
     #[arg(long, env = "IDRAC_USER")]
@@ -116,7 +116,7 @@ struct ServeArgs {
     #[command(flatten)]
     conn: ConnArgs,
     /// Address to expose the RFB/VNC server on.
-    #[arg(long, default_value = "127.0.0.1:5900")]
+    #[arg(long, env = "IDRAC_LISTEN", default_value = "127.0.0.1:5900")]
     listen: String,
     /// Offline self-test: serve a captured frames.bin over RFB instead of connecting to iDRAC.
     #[arg(long)]
@@ -127,16 +127,16 @@ struct ServeArgs {
 #[derive(Args)]
 struct WebArgs {
     /// iDRAC hostname or IP. Credentials are entered in the browser, never stored here.
-    #[arg(long)]
+    #[arg(long, env = "IDRAC_HOST")]
     host: String,
     /// Username pre-filled on the login form.
     #[arg(long, default_value = "root")]
     user: String,
     /// Address to expose the web UI on (plain HTTP; front it with a TLS reverse proxy).
-    #[arg(long, default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "IDRAC_LISTEN", default_value = "127.0.0.1:8080")]
     listen: String,
     /// Directory of noVNC web assets (e.g. `${pkgs.novnc}/share/webapps/novnc`).
-    #[arg(long)]
+    #[arg(long, env = "IDRAC_NOVNC_ROOT")]
     novnc_root: std::path::PathBuf,
     /// Release the KVM session after this many seconds with no connected viewer.
     #[arg(long, default_value_t = 600)]

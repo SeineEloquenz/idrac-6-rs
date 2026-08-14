@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use hyper::header::{CONNECTION, HOST};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -62,7 +63,7 @@ pub async fn request(
         builder = builder.header(*k, *v);
     }
     let req = builder
-        .body(Full::new(body.map(bytes::Bytes::copy_from_slice).unwrap_or_default()))
+        .body(Full::new(body.map(Bytes::copy_from_slice).unwrap_or_default()))
         .context("build request")?;
 
     let exchange = async {

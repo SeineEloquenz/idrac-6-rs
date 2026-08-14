@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Form, State,
@@ -214,7 +215,7 @@ async fn bridge(mut socket: WebSocket, backend: Arc<Backend>) {
             r = rd.read(&mut buf) => match r {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if socket.send(Message::Binary(bytes::Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                    if socket.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
                         break;
                     }
                 }
