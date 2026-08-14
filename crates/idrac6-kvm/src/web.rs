@@ -125,8 +125,14 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
     let session = match auth::login_and_get_token(&st.host, &user, &password).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("web login rejected: {e:#}");
-            return (StatusCode::UNAUTHORIZED, Html(login_page(&st.host, &st.default_user, Some(&e.to_string())))).into_response();
+            let status = match &e {
+                auth::AuthError::BadCredentials => StatusCode::UNAUTHORIZED,
+                auth::AuthError::NoPrivilege => StatusCode::FORBIDDEN,
+                auth::AuthError::MaxSessions => StatusCode::SERVICE_UNAVAILABLE,
+                auth::AuthError::Other(_) => StatusCode::BAD_GATEWAY,
+            };
+            warn!("web login rejected ({status}): {e:#}");
+            return (status, Html(login_page(&st.host, &st.default_user, Some(&e.to_string())))).into_response();
         }
     };
 
