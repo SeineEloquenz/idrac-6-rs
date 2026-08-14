@@ -11,3 +11,4 @@ frames.bin
 /decoder-tables.txt
 *.ppm
 *.png
+run.sh
