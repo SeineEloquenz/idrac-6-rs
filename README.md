@@ -79,6 +79,12 @@ Incoming `hb` tiles are RLE/RGB555-decoded (`src/video/decoder.rs`, ported from 
 to clients. RFB key/pointer events are translated to APCP keyboard (`f`, type 512) and mouse
 (`gc`, type 513) packets.
 
+Keyboard: RFB key events carry X11 keysyms (characters), mapped to USB HID usages for a **US**
+guest layout. Shift is synthesized for characters that need it (uppercase, `!@#`, `_+{}|:"<>?~`)
+so on-screen/mobile keyboards, which send the character without a Shift event, still work. Set
+the guest console keymap to US so the characters land correctly (a non-US console will mis-map
+symbols, since VNC is character-based, not position-based).
+
 ## Origin
 
 Reverse-engineered from the decompiled `avctKVM.jar` for interoperability with hardware you own.
