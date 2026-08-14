@@ -138,7 +138,9 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
 
     let token = random_token();
     let (host, cookies, st1) = (session.host.clone(), session.web_cookies.clone(), session.web_st1.clone());
-    let (shared, input, task) = kvm::spawn(session);
+    // Reconnect by re-minting a KVM token from this same web session (no re-login needed).
+    let refresh = kvm::refresh_from_web(host.clone(), user.clone(), cookies.clone(), st1.clone());
+    let (shared, input, task) = kvm::spawn(refresh, session);
     let backend = Arc::new(Backend {
         token: token.clone(),
         shared,

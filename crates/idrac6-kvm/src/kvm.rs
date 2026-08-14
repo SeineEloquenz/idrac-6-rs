@@ -1,7 +1,10 @@
 //! Live KVM session: connect + authenticate, then decode the ch2 video stream into a shared
 //! framebuffer while pumping frame requests and forwarding input.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use tokio::sync::mpsc;
@@ -49,17 +52,128 @@ pub enum Input {
     Pointer { buttons: u8, x: u16, y: u16 },
 }
 
-/// Run the KVM session until the connection drops. Decodes video into `shared`.
-pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receiver<Input>) -> Result<()> {
+/// The control-channel (ch1) write half, shared between the long-lived input task and each
+/// connection's video loop, and swapped out on every reconnect.
+type Ch1Writer = tokio::io::WriteHalf<Box<dyn apcp::Stream>>;
+type SharedWriter = Arc<tokio::sync::Mutex<Option<Ch1Writer>>>;
+
+/// Mints a fresh [`auth::Session`] for each (re)connect. The KVM token is one-time, so a reconnect
+/// needs a new one. A `BadCredentials`/`NoPrivilege` result stops the supervisor; anything else is
+/// retried with backoff.
+pub type Refresh = Box<dyn FnMut() -> Pin<Box<dyn Future<Output = Result<auth::Session, auth::AuthError>> + Send>> + Send>;
+
+const MAX_FAILS: u32 = 6;
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Build a [`Refresh`] that re-mints a KVM token from a still-valid web session (cookies + ST1),
+/// reusing that one web session so reconnects don't leak sessions toward the appliance's limit.
+pub fn refresh_from_web(host: String, user: String, cookies: Vec<(String, String)>, st1: Option<String>) -> Refresh {
+    Box::new(move || {
+        let (host, user, cookies, st1) = (host.clone(), user.clone(), cookies.clone(), st1.clone());
+        Box::pin(async move {
+            let jnlp = auth::fetch_jnlp(&host, &user, &cookies, st1.as_deref()).await?;
+            let mut s = auth::parse_jnlp(&jnlp)?;
+            s.web_cookies = cookies;
+            s.web_st1 = st1;
+            Ok(s)
+        })
+    })
+}
+
+/// Supervise the KVM connection: keep `shared` + `input_rx` alive across reconnects, and on every
+/// drop re-mint a session and reconnect with exponential backoff. Input + keep-alive run on one
+/// long-lived task writing to whichever control channel is currently up.
+async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receiver<Input>) {
+    let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(None));
+
+    let w_io = writer.clone();
+    let input_task = tokio::spawn(async move {
+        let mut keepalive = tokio::time::interval(Duration::from_secs(2));
+        let mut mods = Mods::default();
+        loop {
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    if let Some(w) = w_io.lock().await.as_mut() {
+                        let _ = apcp::write_packet(w, 1024, &[0u8; 8]).await; // `p` keep-alive
+                    }
+                }
+                ev = input_rx.recv() => match ev {
+                    None => break,
+                    Some(input) => {
+                        if let Some(w) = w_io.lock().await.as_mut() {
+                            let _ = send_input(w, input, &mut mods).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let mut session = Some(initial);
+    let mut backoff = Duration::from_secs(1);
+    let mut fails = 0u32;
+    loop {
+        let s = match session.take() {
+            Some(s) => s,
+            None => match refresh().await {
+                Ok(s) => s,
+                Err(auth::AuthError::BadCredentials | auth::AuthError::NoPrivilege) => {
+                    warn!("reconnect rejected (credentials/privilege); giving up");
+                    break;
+                }
+                Err(e) => {
+                    fails += 1;
+                    warn!(fails, "reconnect token refresh failed: {e}");
+                    if fails > MAX_FAILS {
+                        break;
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    continue;
+                }
+            },
+        };
+
+        let clean = match connect_once(&s, &shared, &writer).await {
+            Ok(()) => {
+                info!("KVM session ended");
+                true
+            }
+            Err(e) => {
+                warn!("KVM session error: {e:#}");
+                false
+            }
+        };
+        *writer.lock().await = None;
+
+        if clean {
+            fails = 0;
+            backoff = Duration::from_secs(1);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        } else {
+            fails += 1;
+            if fails > MAX_FAILS {
+                warn!(fails, "giving up reconnecting");
+                break;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+    }
+    input_task.abort();
+    warn!("KVM supervisor stopped");
+}
+
+/// Open one KVM connection (control + media channels), authenticate, publish the control writer,
+/// and decode video into `shared` until the connection drops. Returns `Ok` on a clean drop.
+async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWriter) -> Result<()> {
     info!(host = %s.host, "connecting KVM session");
     let (mut ch1, _) = apcp::open_channel(&s.host, s.video_port, ConnKind::Primary, false).await?;
     let c = auth::send_login(&mut ch1, &s.user, &s.password, true).await?;
-    let (rd1, wr1) = tokio::io::split(ch1);
-    let mut rd1 = rd1;
+    let (mut rd1, wr1) = tokio::io::split(ch1);
 
-    // Wait for login success.
     loop {
-        let pkt = tokio::time::timeout(std::time::Duration::from_secs(10), apcp::read_packet(&mut rd1))
+        let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(&mut rd1))
             .await
             .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
         if pkt.kind == 0x8305 || pkt.kind == 0x8300 {
@@ -70,21 +184,23 @@ pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receive
         }
     }
     info!("login ok; opening media channel");
+    // Publish the control-channel writer so the input task can reach it.
+    *writer.lock().await = Some(wr1);
+
     let (mut ch2, _) = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary, false).await?;
     apcp::send_link(&mut ch2, c, 0).await?;
-    let (rd2, mut wr2) = tokio::io::split(ch2);
-    let mut rd2 = rd2;
+    let (mut rd2, mut wr2) = tokio::io::split(ch2);
 
     let (tx, mut rx) = mpsc::channel::<(&'static str, apcp::Packet)>(256);
     let tx1 = tx.clone();
-    tokio::spawn(async move {
+    let r1 = tokio::spawn(async move {
         while let Ok(p) = apcp::read_packet(&mut rd1).await {
             if tx1.send(("ch1", p)).await.is_err() {
                 break;
             }
         }
     });
-    tokio::spawn(async move {
+    let r2 = tokio::spawn(async move {
         while let Ok(p) = apcp::read_packet(&mut rd2).await {
             if tx.send(("ch2", p)).await.is_err() {
                 break;
@@ -92,32 +208,8 @@ pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receive
         }
     });
 
-    // Input + keep-alive run on their own task so key make/break are never delayed by video
-    // decode (delayed breaks stick keys -> autorepeat, and interleaving corrupts modifiers).
-    let wr1 = std::sync::Arc::new(tokio::sync::Mutex::new(wr1));
-    let wr1_io = wr1.clone();
-    tokio::spawn(async move {
-        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(2));
-        let mut mods = Mods::default();
-        loop {
-            tokio::select! {
-                _ = keepalive.tick() => {
-                    let mut w = wr1_io.lock().await;
-                    let _ = apcp::write_packet(&mut *w, 1024, &[0u8; 8]).await; // `p` keep-alive
-                }
-                ev = input_rx.recv() => match ev {
-                    None => break,
-                    Some(input) => {
-                        let mut w = wr1_io.lock().await;
-                        let _ = send_input(&mut *w, input, &mut mods).await;
-                    }
-                }
-            }
-        }
-    });
-
     // Video loop: decode ch2 frames into the shared framebuffer, ack flow control on ch2, and
-    // drive the ch1 config reactions.
+    // drive the ch1 config reactions (through the shared control writer).
     let mut dec: Option<Decoder> = None;
     let mut frame: Vec<u8> = Vec::new();
     let mut dims = (0u16, 0u16);
@@ -127,12 +219,14 @@ pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receive
     while let Some((_chan, pkt)) = rx.recv().await {
         match pkt.kind {
             0x0084 => {
-                let mut w = wr1.lock().await;
-                apcp::send_video_start(&mut *w, 1024, 768).await.ok();
+                if let Some(w) = writer.lock().await.as_mut() {
+                    apcp::send_video_start(w, 1024, 768).await.ok();
+                }
             }
             0x8201 => {
-                let mut w = wr1.lock().await;
-                apcp::send_resolution_ack(&mut *w).await.ok();
+                if let Some(w) = writer.lock().await.as_mut() {
+                    apcp::send_resolution_ack(w).await.ok();
+                }
             }
             0x0081 => {
                 hb_count += 1;
@@ -176,6 +270,8 @@ pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receive
             _ => {}
         }
     }
+    r1.abort();
+    r2.abort();
     warn!("KVM channels closed");
     Ok(())
 }
@@ -310,24 +406,44 @@ async fn send_key_hid<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, down: bool, h
     apcp::write_packet(s, 512, &body).await
 }
 
-/// Convenience wrapper used by `serve`/`web`: build the shared fb, spawn the session, hand back
-/// the shared fb, an input sender, and the task handle (abort it to drop the KVM connection).
-pub fn spawn(session: auth::Session) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
+/// Convenience wrapper used by `serve`/`web`: build the shared fb, spawn the supervisor (which
+/// connects, decodes, and reconnects on drops), and hand back the shared fb, an input sender, and
+/// the supervisor task handle (abort it to stop the session and reconnect loop).
+pub fn spawn(refresh: Refresh, initial: auth::Session) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
     let shared = shared(1024, 768);
     let (tx, rx) = mpsc::channel(256);
     let fb = shared.clone();
-    let handle = tokio::spawn(async move {
-        if let Err(e) = run(session, fb, rx).await {
-            warn!("KVM session ended: {e:#}");
-        }
-    });
+    let handle = tokio::spawn(supervise(refresh, initial, fb, rx));
     (shared, tx, handle)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{keysym_to_hid, send_input, Input, Mods};
+    use super::{keysym_to_hid, send_input, shared, supervise, Input, Mods, Refresh};
+    use crate::auth;
+    use std::time::Duration;
     use tokio::io::AsyncReadExt;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn supervisor_stops_on_fatal_refresh() {
+        // Initial session points at a dead port so connect_once errors quickly; the refresh then
+        // returns a fatal auth error, so the supervisor must give up (not loop forever).
+        let initial = auth::Session {
+            host: "127.0.0.1".into(),
+            user: "x".into(),
+            password: "x".into(),
+            video_port: 1,
+            kvm_port: 1,
+            web_cookies: vec![],
+            web_st1: None,
+        };
+        let refresh: Refresh = Box::new(|| Box::pin(async { Err(auth::AuthError::BadCredentials) }));
+        let (_tx, rx) = mpsc::channel(4);
+        tokio::time::timeout(Duration::from_secs(8), supervise(refresh, initial, shared(8, 8), rx))
+            .await
+            .expect("supervisor must terminate on a fatal refresh, not hang");
+    }
 
     /// Parse consecutive 16-byte APCP key packets into (down, hid) pairs.
     fn key_events(buf: &[u8]) -> Vec<(bool, u16)> {
