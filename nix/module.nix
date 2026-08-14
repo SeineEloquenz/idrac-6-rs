@@ -5,7 +5,7 @@ let
 in
 {
   options.services.idrac6-kvm = {
-    enable = lib.mkEnableOption "iDRAC 6 KVM proxy (APCP to RFB/VNC)";
+    enable = lib.mkEnableOption "iDRAC 6 KVM web console (browser login + noVNC)";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -16,71 +16,55 @@ in
 
     host = lib.mkOption {
       type = lib.types.str;
-      description = "iDRAC hostname or IP address.";
+      description = "iDRAC hostname or IP address the console connects to.";
     };
 
     user = lib.mkOption {
       type = lib.types.str;
       default = "root";
-      description = "iDRAC username used to mint the KVM session token.";
-    };
-
-    passwordFile = lib.mkOption {
-      type = lib.types.path;
-      description = "Path to a file containing the iDRAC password (kept out of the store).";
+      description = "Username pre-filled on the login form.";
     };
 
     listen = lib.mkOption {
       type = lib.types.str;
-      default = "127.0.0.1:5900";
-      description = "Address the RFB/VNC server listens on.";
+      default = "127.0.0.1:8080";
+      description = ''
+        host:port the web UI listens on. Plain HTTP — the iDRAC credentials are entered in the
+        browser, so bind to localhost and put a TLS reverse proxy in front, or bind only to a
+        trusted network.
+      '';
     };
 
-    novnc = {
-      enable = lib.mkEnableOption "the optional noVNC browser frontend (noVNC + websockify)";
-      listen = lib.mkOption {
-        type = lib.types.str;
-        default = "127.0.0.1:6080";
-        description = "host:port the noVNC web endpoint listens on.";
-      };
+    novncPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.novnc;
+      defaultText = lib.literalExpression "pkgs.novnc";
+      description = "noVNC package whose web assets are served to the browser.";
+    };
+
+    idleTimeout = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 600;
+      description = "Release the KVM session after this many seconds with no connected viewer.";
     };
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services.idrac6-kvm =
-      let
-        runner = pkgs.writeShellScript "idrac6-kvm-run" ''
-          export IDRAC_PASSWORD="$(cat "${cfg.passwordFile}")"
-          exec ${lib.getExe cfg.package} serve \
-            --host ${lib.escapeShellArg cfg.host} \
-            --user ${lib.escapeShellArg cfg.user} \
-            --listen ${lib.escapeShellArg cfg.listen}
-        '';
-      in
-      {
-        description = "iDRAC 6 KVM proxy";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
-        serviceConfig = {
-          ExecStart = runner;
-          DynamicUser = true;
-          Restart = "on-failure";
-          RestartSec = 5;
-        };
-      };
-
-    systemd.services.idrac6-kvm-novnc = lib.mkIf cfg.novnc.enable {
-      description = "noVNC frontend for idrac6-kvm";
+    systemd.services.idrac6-kvm = {
+      description = "iDRAC 6 KVM web console";
       wantedBy = [ "multi-user.target" ];
-      after = [ "idrac6-kvm.service" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
       serviceConfig = {
-        # websockify bridges the RFB TCP port to a browser-facing WebSocket + serves noVNC.
-        ExecStart = ''
-          ${pkgs.python3Packages.websockify}/bin/websockify \
-            --web=${pkgs.novnc}/share/webapps/novnc \
-            ${cfg.novnc.listen} ${cfg.listen}
-        '';
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe cfg.package)
+          "web"
+          "--host" cfg.host
+          "--user" cfg.user
+          "--listen" cfg.listen
+          "--novnc-root" "${cfg.novncPackage}/share/webapps/novnc"
+          "--idle-timeout" (toString cfg.idleTimeout)
+        ];
         DynamicUser = true;
         Restart = "on-failure";
         RestartSec = 5;

@@ -5,6 +5,7 @@ mod kvm;
 mod rfb;
 mod tls;
 mod video;
+mod web;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -26,6 +27,8 @@ enum Cmd {
     Capture(CaptureArgs),
     /// Run the full proxy: KVM session in, RFB/VNC server out.
     Serve(ServeArgs),
+    /// Run the self-serve web UI: browser login (iDRAC creds) + noVNC, no stored secret.
+    Web(WebArgs),
     /// Debug: issue one HTTPS GET over the legacy-TLS layer and print the response.
     Get(GetArgs),
     /// Offline: decode a captured frames.bin dump to a PPM image (decoder development).
@@ -127,6 +130,25 @@ struct ServeArgs {
     replay: Option<std::path::PathBuf>,
 }
 
+#[derive(Args)]
+struct WebArgs {
+    /// iDRAC hostname or IP. Credentials are entered in the browser, never stored here.
+    #[arg(long)]
+    host: String,
+    /// Username pre-filled on the login form.
+    #[arg(long, default_value = "root")]
+    user: String,
+    /// Address to expose the web UI on (plain HTTP; front it with a TLS reverse proxy).
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    listen: String,
+    /// Directory of noVNC web assets (e.g. `${pkgs.novnc}/share/webapps/novnc`).
+    #[arg(long)]
+    novnc_root: std::path::PathBuf,
+    /// Release the KVM session after this many seconds with no connected viewer.
+    #[arg(long, default_value_t = 600)]
+    idle_timeout: u64,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -139,6 +161,7 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Capture(a) => capture(a).await,
         Cmd::Serve(a) => serve(a).await,
+        Cmd::Web(a) => web::run(a.host, a.user, a.listen, a.novnc_root, a.idle_timeout).await,
         Cmd::Get(a) => {
             let r = http::request(&a.host, 443, "GET", &a.path, &[], None).await?;
             info!(status = r.status, cookies = ?r.cookies(), "response");
@@ -192,7 +215,7 @@ fn decode_dump(a: DecodeArgs) -> Result<()> {
     let mut dec = video::decoder::Decoder::new(w, h);
     let n = if a.frames == 0 { frames.len() } else { a.frames.min(frames.len()) };
     for (i, (_, _, payload)) in frames.iter().take(n).enumerate() {
-        let ops = dec.decode_frame(payload, &mut fb);
+        let (ops, _) = dec.decode_frame(payload, &mut fb);
         info!(frame = i, bytes = payload.len(), ops, "decoded");
     }
     fb.write_ppm(&a.out)?;
@@ -332,7 +355,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
     // Keep the web-session handle for logout on shutdown (the KVM token is bound to it, so we
     // must not log out while streaming).
     let (host, cookies, st1) = (s.host.clone(), s.web_cookies.clone(), s.web_st1.clone());
-    let (shared, input) = kvm::spawn(s);
+    let (shared, input, _task) = kvm::spawn(s);
     info!(listen = %a.listen, "RFB server listening — point a VNC client here (Ctrl-C to stop)");
 
     // Serve until the RFB loop ends or a shutdown signal arrives, then always clean up.
@@ -349,7 +372,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
 }
 
 /// Resolve on Ctrl-C (SIGINT) or SIGTERM.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };

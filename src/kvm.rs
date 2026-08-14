@@ -11,16 +11,33 @@ use crate::apcp::{self, ConnKind};
 use crate::auth;
 use crate::video::{decoder::Decoder, Framebuffer};
 
-/// Shared framebuffer with a generation counter bumped on every decoded frame.
+/// Shared framebuffer with a generation counter bumped on every decoded frame and the union of
+/// changed pixel ranges (half-open linear indices) since a client last consumed them.
 pub struct FbState {
     pub fb: Framebuffer,
     pub generation: u64,
+    dirty: Option<(usize, usize)>,
+}
+
+impl FbState {
+    /// Union a decoded frame's changed span into the pending damage.
+    pub fn mark_dirty(&mut self, (lo, hi): (usize, usize)) {
+        self.dirty = Some(match self.dirty {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+    }
+
+    /// Take and clear the pending damage span.
+    pub fn take_dirty(&mut self) -> Option<(usize, usize)> {
+        self.dirty.take()
+    }
 }
 
 pub type SharedFb = Arc<Mutex<FbState>>;
 
 pub fn shared(width: u32, height: u32) -> SharedFb {
-    Arc::new(Mutex::new(FbState { fb: Framebuffer::new(width, height), generation: 0 }))
+    Arc::new(Mutex::new(FbState { fb: Framebuffer::new(width, height), generation: 0, dirty: None }))
 }
 
 /// Input events from the RFB layer, translated to APCP on the KVM channel.
@@ -137,8 +154,13 @@ pub async fn run(s: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receive
                                 dec = Some(Decoder::new(w, h));
                             }
                             let d = dec.get_or_insert_with(|| Decoder::new(w, h));
-                            d.decode_frame(&frame, &mut g.fb);
-                            g.generation = g.generation.wrapping_add(1);
+                            let (_, dirty) = d.decode_frame(&frame, &mut g.fb);
+                            // Only advance the generation on real damage, so a no-op frame never
+                            // wakes a client into the empty-dirty full-frame fallback.
+                            if let Some(r) = dirty {
+                                g.mark_dirty(r);
+                                g.generation = g.generation.wrapping_add(1);
+                            }
                         }
                         frames_decoded += 1;
                         if frames_decoded.is_multiple_of(300) {
@@ -246,16 +268,16 @@ fn keysym_to_hid(ks: u32) -> Option<u16> {
     Some(hid)
 }
 
-/// Convenience wrapper used by `serve`: build the shared fb, spawn the session, hand back the
-/// shared fb and an input sender.
-pub fn spawn(session: auth::Session) -> (SharedFb, mpsc::Sender<Input>) {
+/// Convenience wrapper used by `serve`/`web`: build the shared fb, spawn the session, hand back
+/// the shared fb, an input sender, and the task handle (abort it to drop the KVM connection).
+pub fn spawn(session: auth::Session) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
     let shared = shared(1024, 768);
     let (tx, rx) = mpsc::channel(256);
     let fb = shared.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         if let Err(e) = run(session, fb, rx).await {
             warn!("KVM session ended: {e:#}");
         }
     });
-    (shared, tx)
+    (shared, tx, handle)
 }

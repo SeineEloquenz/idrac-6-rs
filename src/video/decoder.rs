@@ -31,12 +31,15 @@ impl Decoder {
         Self { width: width as usize, cursor: 0 }
     }
 
-    /// Decode one frame payload into `fb` (persistent across frames). Returns op count.
-    pub fn decode_frame(&mut self, p: &[u8], fb: &mut Framebuffer) -> usize {
+    /// Decode one frame payload into `fb` (persistent across frames). Returns the op count and
+    /// the changed pixel span as a half-open linear index range (`None` if nothing was written).
+    /// `skip` advances the cursor without writing, so the span bounds the actual damage.
+    pub fn decode_frame(&mut self, p: &[u8], fb: &mut Framebuffer) -> (usize, Option<(usize, usize)>) {
         self.cursor = 0;
         let len = fb.pixels.len();
         let mut o = 0usize;
         let mut ops = 0usize;
+        let (mut dmin, mut dmax) = (usize::MAX, 0usize);
 
         // Variable-length run: low 5 bits of the op byte, extended by up to 4 following
         // bytes that share the same top-3-bit op tag.
@@ -56,6 +59,7 @@ impl Decoder {
             let by = p[o];
             o += 1;
             ops += 1;
+            let cur_before = self.cursor;
             match by & 0xE0 {
                 0x00 => {
                     // skip: advance cursor, keep previous-frame pixels
@@ -96,8 +100,14 @@ impl Decoder {
                     }
                 }
             }
+            // Anything but `skip` (0x00) wrote pixels in [cur_before, cursor).
+            if by & 0xE0 != 0x00 {
+                dmin = dmin.min(cur_before);
+                dmax = dmax.max(self.cursor);
+            }
         }
-        ops
+        let dirty = (dmax > dmin).then_some((dmin, dmax));
+        (ops, dirty)
     }
 
     /// Two-colour pattern fill (f() in d/b.java): 4 pixels from the op byte's low nibble,
@@ -138,5 +148,28 @@ impl Decoder {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_span_covers_only_written_pixels() {
+        let mut fb = Framebuffer::new(8, 4); // 32 pixels
+        let mut dec = Decoder::new(8, 4);
+        // skip 5, then 3 white RGB555 literals -> damage is exactly [5, 8).
+        let payload = [0x05u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let (_, dirty) = dec.decode_frame(&payload, &mut fb);
+        assert_eq!(dirty, Some((5, 8)));
+    }
+
+    #[test]
+    fn skip_only_frame_is_not_dirty() {
+        let mut fb = Framebuffer::new(8, 4);
+        let mut dec = Decoder::new(8, 4);
+        let (_, dirty) = dec.decode_frame(&[0x1F], &mut fb); // skip 31, no writes
+        assert_eq!(dirty, None);
     }
 }

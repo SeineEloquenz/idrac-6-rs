@@ -1,9 +1,11 @@
 # idrac6-kvm
 
 A modern, Java-free replacement for the Dell iDRAC 6 KVM console (PowerEdge R710). It speaks
-iDRAC 6's native `APCP` protocol directly and re-exposes the remote console as a standard
-**RFB/VNC** server, so any VNC client works. Browser access is provided optionally, via noVNC
-from nixpkgs, by the bundled NixOS module.
+iDRAC 6's native `APCP` protocol directly and re-exposes the remote console either as a standard
+**RFB/VNC** server (any VNC client works) or as a **self-serve web console**: a browser login
+page that authenticates with the iDRAC credentials themselves and serves noVNC. In web mode no
+secret is stored on the server — the iDRAC credentials entered in the browser are the only
+credential. noVNC assets come from nixpkgs, not bundled into the binary.
 
 Scope: **KVM console** — video + keyboard + mouse. No virtual media / power / serial-over-LAN.
 
@@ -16,6 +18,7 @@ Working end to end against a real R710:
 - Video: decodes the RLE/RGB555 stream to a framebuffer — pixel-perfect
 - Output: minimal RFB 3.8 server — verified with an independent VNC client
 - Input: keyboard + absolute-pointer mouse → APCP (packet types 512/513)
+- Web mode: browser login gate + noVNC over an in-process RFB-over-WebSocket bridge
 
 ## Build
 
@@ -28,9 +31,14 @@ nix develop .#capture   # extra tools for the M0 capture spike (tigervnc, tshark
 ## Use
 
 ```sh
-# Live console over RFB/VNC (account credentials; the tool mints the KVM token itself).
+# Web console: browser login with iDRAC credentials, serves noVNC. No secret on the CLI.
+NOVNC=$(nix build nixpkgs#novnc --no-link --print-out-paths)/share/webapps/novnc
+idrac6-kvm web --host <idrac-ip> --listen 127.0.0.1:8080 --novnc-root "$NOVNC"
+# then open http://127.0.0.1:8080/ and log in with the iDRAC account.
+
+# Live console over plain RFB/VNC (for native VNC clients; the tool mints the KVM token itself).
 IDRAC_PASSWORD='…' idrac6-kvm serve --host <idrac-ip> --user root --listen 127.0.0.1:5900
-# then: vncviewer 127.0.0.1:5900   (or the NixOS module's noVNC in a browser)
+# then: vncviewer 127.0.0.1:5900
 
 # Debug: log the handshake + typed packets, optionally dumping the video for offline work.
 IDRAC_PASSWORD='…' idrac6-kvm capture --host <idrac-ip> --seconds 15 --dump frames.bin
@@ -40,8 +48,10 @@ idrac6-kvm decode --input frames.bin --out frame.ppm
 idrac6-kvm serve  --replay frames.bin --listen 127.0.0.1:5900
 ```
 
-Instead of `--host/--user/--password`, pass `--jnlp viewer.jnlp` to use a token from a
-downloaded Virtual Console descriptor.
+`web` serves plain HTTP: bind it to localhost behind a TLS reverse proxy, or to a trusted
+network — the browser sends the iDRAC credentials to it. For `serve`/`capture`, instead of
+`--host/--user/--password` you can pass `--jnlp viewer.jnlp` to use a token from a downloaded
+Virtual Console descriptor.
 
 ## NixOS module
 
@@ -50,13 +60,15 @@ downloaded Virtual Console descriptor.
 # configuration.nix:
 services.idrac6-kvm = {
   enable = true;
-  host = "192.0.2.10";
-  user = "root";
-  passwordFile = "/run/secrets/idrac-password";  # kept out of the store
-  listen = "127.0.0.1:5900";
-  novnc.enable = true;         # optional browser frontend at 127.0.0.1:6080
+  host = "192.0.2.10";        # non-secret; credentials are entered in the browser
+  user = "root";              # pre-filled on the login form
+  listen = "127.0.0.1:8080";  # plain HTTP — front with a TLS reverse proxy
+  idleTimeout = 600;          # release the KVM session after 10 min idle
 };
 ```
+
+Front it with nginx/Caddy for TLS, e.g. `services.nginx.virtualHosts."kvm.example"` proxying to
+`http://127.0.0.1:8080` (pass through the `/websockify` WebSocket upgrade).
 
 ## How it works
 

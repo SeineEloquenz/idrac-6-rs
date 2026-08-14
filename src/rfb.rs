@@ -1,10 +1,10 @@
 //! Minimal RFB 3.8 (VNC) server exposing the shared framebuffer. Security = None, one Raw
-//! encoding. Any native VNC client works; browser access is layered on via noVNC + websockify
-//! (NixOS module). Input events are forwarded to the KVM session.
+//! encoding. Serves any duplex stream: a TCP socket for native VNC clients, or an
+//! RFB-over-WebSocket pipe for the browser (noVNC). Input events are forwarded to the KVM session.
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -17,16 +17,20 @@ pub async fn serve(listener: TcpListener, shared: SharedFb, input: mpsc::Sender<
         let fb = shared.clone();
         let tx = input.clone();
         tokio::spawn(async move {
-            if let Err(e) = client(sock, fb, tx).await {
+            sock.set_nodelay(true).ok();
+            if let Err(e) = serve_conn(sock, fb, tx).await {
                 warn!(%peer, "RFB client ended: {e:#}");
             }
         });
     }
 }
 
-async fn client(mut sock: TcpStream, shared: SharedFb, input: mpsc::Sender<Input>) -> Result<()> {
-    sock.set_nodelay(true).ok();
-
+/// Run the RFB protocol over one duplex stream until it closes.
+pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
+    mut sock: S,
+    shared: SharedFb,
+    input: mpsc::Sender<Input>,
+) -> Result<()> {
     // ProtocolVersion
     sock.write_all(b"RFB 003.008\n").await?;
     let mut ver = [0u8; 12];
@@ -115,35 +119,63 @@ fn server_init(w: u16, h: u16) -> Vec<u8> {
     v
 }
 
-/// Send a FramebufferUpdate. Waits briefly for a new frame; if none, sends an empty update.
-async fn send_update(sock: &mut TcpStream, shared: &SharedFb, last_gen: &mut u64) -> Result<()> {
-    // Wait up to ~1s for a change so idle clients don't busy-loop.
+/// One Raw rectangle to send, or an empty update.
+enum Update {
+    Empty,
+    Rect { x: u16, y: u16, w: u16, h: u16, pixels: Vec<u32> },
+}
+
+/// Send a FramebufferUpdate. Waits briefly for a new frame, then sends only the changed
+/// row-band (the whole framebuffer on the first update); an empty update if nothing changed.
+async fn send_update<S: AsyncWrite + Unpin>(sock: &mut S, shared: &SharedFb, last_gen: &mut u64) -> Result<()> {
+    // Wait up to ~1s for a new frame so idle clients don't busy-loop.
     let mut waited = 0;
-    let (w, h, gen, pixels) = loop {
-        let snap = {
-            let g = shared.lock().unwrap();
-            (g.fb.width, g.fb.height, g.generation, if g.generation != *last_gen { Some(g.fb.pixels.clone()) } else { None })
-        };
-        if let (w, h, gen, Some(px)) = snap {
-            break (w, h, gen, px);
+    loop {
+        if shared.lock().unwrap().generation != *last_gen {
+            break;
         }
         if waited >= 1000 {
-            // no change: empty update (0 rectangles)
             sock.write_all(&[0u8, 0, 0, 0]).await?;
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        waited += 30;
-    };
-    *last_gen = gen;
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        waited += 15;
+    }
 
+    let update = {
+        // First update after connect must paint the whole screen; afterwards only the damage.
+        let first = *last_gen == u64::MAX;
+        let mut g = shared.lock().unwrap();
+        *last_gen = g.generation;
+        let width = g.fb.width as usize;
+        let len = g.fb.pixels.len();
+        let range = if first || width == 0 { None } else { g.take_dirty() };
+        match range {
+            Some((lo, hi)) if hi > lo && hi <= len => {
+                let (y0, y1) = (lo / width, (hi - 1) / width);
+                let pixels = g.fb.pixels[y0 * width..(y1 + 1) * width].to_vec();
+                Update::Rect { x: 0, y: y0 as u16, w: width as u16, h: (y1 - y0 + 1) as u16, pixels }
+            }
+            _ if width == 0 => Update::Empty,
+            _ => {
+                // First update, or damage already consumed by another viewer: send full frame.
+                let (w, h) = (g.fb.width as u16, g.fb.height as u16);
+                Update::Rect { x: 0, y: 0, w, h, pixels: g.fb.pixels.clone() }
+            }
+        }
+    };
+
+    let Update::Rect { x, y, w, h, pixels } = update else {
+        sock.write_all(&[0u8, 0, 0, 0]).await?;
+        return Ok(());
+    };
     let mut msg = Vec::with_capacity(16 + pixels.len() * 4);
     msg.extend_from_slice(&[0u8, 0]); // message-type 0 + padding
     msg.extend_from_slice(&1u16.to_be_bytes()); // number-of-rectangles
-    msg.extend_from_slice(&0u16.to_be_bytes()); // x
-    msg.extend_from_slice(&0u16.to_be_bytes()); // y
-    msg.extend_from_slice(&(w as u16).to_be_bytes());
-    msg.extend_from_slice(&(h as u16).to_be_bytes());
+    msg.extend_from_slice(&x.to_be_bytes());
+    msg.extend_from_slice(&y.to_be_bytes());
+    msg.extend_from_slice(&w.to_be_bytes());
+    msg.extend_from_slice(&h.to_be_bytes());
     msg.extend_from_slice(&0i32.to_be_bytes()); // encoding: Raw
     for px in &pixels {
         msg.extend_from_slice(&px.to_le_bytes()); // 0xFFRRGGBB -> [B,G,R,FF]
