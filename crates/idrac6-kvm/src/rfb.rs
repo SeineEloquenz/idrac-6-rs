@@ -92,14 +92,53 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
                     .await;
             }
             6 => {
-                let mut b = [0u8; 7]; // ClientCutText: pad(3)+len(4)
-                sock.read_exact(&mut b).await?;
-                let n = u32::from_be_bytes([b[3], b[4], b[5], b[6]]) as usize;
-                let mut skip = vec![0u8; n];
-                sock.read_exact(&mut skip).await?;
+                let mut hdr = [0u8; 7]; // ClientCutText: pad(3) + length(4)
+                sock.read_exact(&mut hdr).await?;
+                let raw_len = i32::from_be_bytes([hdr[3], hdr[4], hdr[5], hdr[6]]);
+                let n = raw_len.unsigned_abs() as usize;
+                if n > 1 << 20 {
+                    anyhow::bail!("implausible ClientCutText length {n}");
+                }
+                let mut text = vec![0u8; n];
+                sock.read_exact(&mut text).await?;
+                // Basic ClientCutText (positive length) is Latin-1 text the user pasted; type it
+                // into the guest. The extended-clipboard format uses a negative length and a
+                // different layout, which we don't advertise, so it is consumed and ignored.
+                if raw_len > 0 {
+                    paste_text(&text, &input).await;
+                }
             }
             other => anyhow::bail!("unknown RFB client message {other}"),
         }
+    }
+}
+
+/// Type pasted clipboard text into the guest as keystrokes (the iDRAC carries only keyboard and
+/// mouse, so paste is synthesized typing). Latin-1 printables map to their keysym; the existing
+/// input path adds Shift where needed. Paced so the guest registers each key rather than
+/// coalescing a burst into dropped characters.
+async fn paste_text(text: &[u8], input: &mpsc::Sender<Input>) {
+    for &c in text {
+        let Some(keysym) = paste_keysym(c) else { continue };
+        if input.send(Input::Key { down: true, keysym }).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        if input.send(Input::Key { down: false, keysym }).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+    }
+}
+
+/// A Latin-1 clipboard byte mapped to its X11 keysym, or `None` for control bytes we skip.
+/// Downstream `send_input` turns the keysym into a HID usage and synthesizes Shift as needed.
+fn paste_keysym(c: u8) -> Option<u32> {
+    match c {
+        b'\n' | b'\r' => Some(0xFF0D),               // Return
+        b'\t' => Some(0xFF09),                       // Tab
+        0x20..=0x7E | 0xA0..=0xFF => Some(c as u32), // printable Latin-1: keysym == codepoint
+        _ => None,
     }
 }
 
@@ -182,4 +221,22 @@ async fn send_update<S: AsyncWrite + Unpin>(sock: &mut S, shared: &SharedFb, las
     }
     sock.write_all(&msg).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paste_keysym;
+
+    #[test]
+    fn paste_keysym_maps_printables_and_specials() {
+        assert_eq!(paste_keysym(b'P'), Some(0x50)); // upper -> keysym (Shift added downstream)
+        assert_eq!(paste_keysym(b'a'), Some(0x61));
+        assert_eq!(paste_keysym(b'9'), Some(0x39));
+        assert_eq!(paste_keysym(b'!'), Some(0x21));
+        assert_eq!(paste_keysym(b'\n'), Some(0xFF0D));
+        assert_eq!(paste_keysym(b'\r'), Some(0xFF0D));
+        assert_eq!(paste_keysym(b'\t'), Some(0xFF09));
+        assert_eq!(paste_keysym(0x00), None);
+        assert_eq!(paste_keysym(0x7F), None);
+    }
 }
