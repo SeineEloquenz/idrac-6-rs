@@ -52,6 +52,8 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
     sock.write_all(&server_init(w, h)).await?;
 
     let mut last_gen = u64::MAX;
+    let mut last_dims = (w, h); // size the client currently knows; DesktopSize keeps it in sync
+    let mut desktopsize = false;
     let mut ty = [0u8; 1];
     loop {
         sock.read_exact(&mut ty).await?;
@@ -66,11 +68,15 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
                 let n = u16::from_be_bytes([b[1], b[2]]) as usize;
                 let mut enc = vec![0u8; n * 4];
                 sock.read_exact(&mut enc).await?;
+                // DesktopSize pseudo-encoding (-223) = the client can be told about resizes.
+                if enc.chunks_exact(4).any(|c| c == [0xFF, 0xFF, 0xFF, 0x21]) {
+                    desktopsize = true;
+                }
             }
             3 => {
                 let mut b = [0u8; 9]; // FramebufferUpdateRequest
                 sock.read_exact(&mut b).await?;
-                send_update(&mut sock, &shared, &mut last_gen).await?;
+                send_update(&mut sock, &shared, &mut last_gen, &mut last_dims, desktopsize).await?;
             }
             4 => {
                 let mut b = [0u8; 7]; // KeyEvent: down(1)+pad(2)+keysym(4)
@@ -158,15 +164,34 @@ fn server_init(w: u16, h: u16) -> Vec<u8> {
     v
 }
 
-/// One Raw rectangle to send, or an empty update.
+/// A framebuffer update: nothing changed, a resolution change (DesktopSize + full frame), or one
+/// changed rectangle.
 enum Update {
     Empty,
+    Resize { w: u16, h: u16, pixels: Vec<u32> },
     Rect { x: u16, y: u16, w: u16, h: u16, pixels: Vec<u32> },
 }
 
-/// Send a FramebufferUpdate. Waits briefly for a new frame, then sends only the changed
-/// row-band (the whole framebuffer on the first update); an empty update if nothing changed.
-async fn send_update<S: AsyncWrite + Unpin>(sock: &mut S, shared: &SharedFb, last_gen: &mut u64) -> Result<()> {
+/// Append a rectangle header (x, y, w, h, encoding), all big-endian.
+fn push_rect(msg: &mut Vec<u8>, x: u16, y: u16, w: u16, h: u16, encoding: i32) {
+    msg.extend_from_slice(&x.to_be_bytes());
+    msg.extend_from_slice(&y.to_be_bytes());
+    msg.extend_from_slice(&w.to_be_bytes());
+    msg.extend_from_slice(&h.to_be_bytes());
+    msg.extend_from_slice(&encoding.to_be_bytes());
+}
+
+/// Send a FramebufferUpdate. Waits briefly for a new frame, then sends only the changed row-band
+/// (the whole framebuffer on the first update). When the framebuffer resized and the client
+/// advertised DesktopSize (-223), prefix a DesktopSize pseudo-rect so it re-sizes; an empty update
+/// if nothing changed.
+async fn send_update<S: AsyncWrite + Unpin>(
+    sock: &mut S,
+    shared: &SharedFb,
+    last_gen: &mut u64,
+    last_dims: &mut (u16, u16),
+    desktopsize: bool,
+) -> Result<()> {
     // Wait up to ~1s for a new frame so idle clients don't busy-loop.
     let mut waited = 0;
     loop {
@@ -186,38 +211,55 @@ async fn send_update<S: AsyncWrite + Unpin>(sock: &mut S, shared: &SharedFb, las
         let first = *last_gen == u64::MAX;
         let mut g = shared.lock().unwrap();
         *last_gen = g.generation;
+        let (fw, fh) = (g.fb.width as u16, g.fb.height as u16);
         let width = g.fb.width as usize;
         let len = g.fb.pixels.len();
-        let range = if first || width == 0 { None } else { g.take_dirty() };
-        match range {
-            Some((lo, hi)) if hi > lo && hi <= len => {
-                let (y0, y1) = (lo / width, (hi - 1) / width);
-                let pixels = g.fb.pixels[y0 * width..(y1 + 1) * width].to_vec();
-                Update::Rect { x: 0, y: y0 as u16, w: width as u16, h: (y1 - y0 + 1) as u16, pixels }
-            }
-            _ if width == 0 => Update::Empty,
-            _ => {
+        if width == 0 || len == 0 {
+            Update::Empty
+        } else if desktopsize && (fw, fh) != *last_dims {
+            // Resolution changed: announce the new size and repaint the whole (new) frame.
+            *last_dims = (fw, fh);
+            g.take_dirty();
+            Update::Resize { w: fw, h: fh, pixels: g.fb.pixels.clone() }
+        } else {
+            let range = if first { None } else { g.take_dirty() };
+            match range {
+                Some((lo, hi)) if hi > lo && hi <= len => {
+                    let (y0, y1) = (lo / width, (hi - 1) / width);
+                    let pixels = g.fb.pixels[y0 * width..(y1 + 1) * width].to_vec();
+                    Update::Rect { x: 0, y: y0 as u16, w: fw, h: (y1 - y0 + 1) as u16, pixels }
+                }
                 // First update, or damage already consumed by another viewer: send full frame.
-                let (w, h) = (g.fb.width as u16, g.fb.height as u16);
-                Update::Rect { x: 0, y: 0, w, h, pixels: g.fb.pixels.clone() }
+                _ => Update::Rect { x: 0, y: 0, w: fw, h: fh, pixels: g.fb.pixels.clone() },
             }
         }
     };
 
-    let Update::Rect { x, y, w, h, pixels } = update else {
-        sock.write_all(&[0u8, 0, 0, 0]).await?;
-        return Ok(());
-    };
-    let mut msg = Vec::with_capacity(16 + pixels.len() * 4);
-    msg.extend_from_slice(&[0u8, 0]); // message-type 0 + padding
-    msg.extend_from_slice(&1u16.to_be_bytes()); // number-of-rectangles
-    msg.extend_from_slice(&x.to_be_bytes());
-    msg.extend_from_slice(&y.to_be_bytes());
-    msg.extend_from_slice(&w.to_be_bytes());
-    msg.extend_from_slice(&h.to_be_bytes());
-    msg.extend_from_slice(&0i32.to_be_bytes()); // encoding: Raw
-    for px in &pixels {
-        msg.extend_from_slice(&px.to_le_bytes()); // 0xFFRRGGBB -> [B,G,R,FF]
+    let mut msg = Vec::new();
+    match update {
+        Update::Empty => {
+            sock.write_all(&[0u8, 0, 0, 0]).await?;
+            return Ok(());
+        }
+        Update::Resize { w, h, pixels } => {
+            msg.reserve(28 + pixels.len() * 4);
+            msg.extend_from_slice(&[0u8, 0]); // FramebufferUpdate + padding
+            msg.extend_from_slice(&2u16.to_be_bytes()); // 2 rectangles
+            push_rect(&mut msg, 0, 0, w, h, -223); // DesktopSize pseudo-rect
+            push_rect(&mut msg, 0, 0, w, h, 0); // full Raw frame at the new size
+            for px in &pixels {
+                msg.extend_from_slice(&px.to_le_bytes());
+            }
+        }
+        Update::Rect { x, y, w, h, pixels } => {
+            msg.reserve(16 + pixels.len() * 4);
+            msg.extend_from_slice(&[0u8, 0]);
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            push_rect(&mut msg, x, y, w, h, 0); // Raw
+            for px in &pixels {
+                msg.extend_from_slice(&px.to_le_bytes()); // 0xFFRRGGBB -> [B,G,R,FF]
+            }
+        }
     }
     sock.write_all(&msg).await?;
     Ok(())
@@ -225,7 +267,9 @@ async fn send_update<S: AsyncWrite + Unpin>(sock: &mut S, shared: &SharedFb, las
 
 #[cfg(test)]
 mod tests {
-    use super::paste_keysym;
+    use super::{paste_keysym, serve_conn};
+    use crate::video::Framebuffer;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     #[test]
     fn paste_keysym_maps_printables_and_specials() {
@@ -238,5 +282,72 @@ mod tests {
         assert_eq!(paste_keysym(b'\t'), Some(0xFF09));
         assert_eq!(paste_keysym(0x00), None);
         assert_eq!(paste_keysym(0x7F), None);
+    }
+
+    async fn fbu_rects(c: &mut DuplexStream) -> u16 {
+        let mut h = [0u8; 4];
+        c.read_exact(&mut h).await.unwrap();
+        assert_eq!(h[0], 0); // FramebufferUpdate
+        u16::from_be_bytes([h[2], h[3]])
+    }
+
+    /// Read a rectangle header, returning (w, h, encoding), and skip any Raw pixel data.
+    async fn rect(c: &mut DuplexStream) -> (u16, u16, i32) {
+        let mut r = [0u8; 12];
+        c.read_exact(&mut r).await.unwrap();
+        let (w, h) = (u16::from_be_bytes([r[4], r[5]]), u16::from_be_bytes([r[6], r[7]]));
+        let enc = i32::from_be_bytes([r[8], r[9], r[10], r[11]]);
+        if enc == 0 {
+            let mut px = vec![0u8; w as usize * h as usize * 4];
+            c.read_exact(&mut px).await.unwrap();
+        }
+        (w, h, enc)
+    }
+
+    #[tokio::test]
+    async fn desktopsize_announced_on_resolution_change() {
+        let shared = crate::kvm::shared(4, 2);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::kvm::Input>(4);
+        let (mut c, server_end) = tokio::io::duplex(1 << 16);
+        let srv = tokio::spawn(serve_conn(server_end, shared.clone(), tx));
+
+        // RFB 3.8 handshake.
+        let mut buf = [0u8; 12];
+        c.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"RFB 003.008\n");
+        c.write_all(b"RFB 003.008\n").await.unwrap();
+        c.read_exact(&mut [0u8; 2]).await.unwrap(); // security types
+        c.write_all(&[1]).await.unwrap(); // choose None
+        c.read_exact(&mut [0u8; 4]).await.unwrap(); // SecurityResult
+        c.write_all(&[1]).await.unwrap(); // ClientInit
+        let mut init = [0u8; 24];
+        c.read_exact(&mut init).await.unwrap();
+        assert_eq!((init[0], init[1], init[2], init[3]), (0, 4, 0, 2)); // 4x2
+        let namelen = u32::from_be_bytes([init[20], init[21], init[22], init[23]]) as usize;
+        c.read_exact(&mut vec![0u8; namelen]).await.unwrap();
+
+        // Advertise DesktopSize (-223).
+        c.write_all(&[2, 0, 0, 1]).await.unwrap();
+        c.write_all(&(-223i32).to_be_bytes()).await.unwrap();
+
+        // First update is the full 4x2 frame.
+        c.write_all(&[3, 0, 0, 0, 0, 0, 0, 4, 0, 2]).await.unwrap();
+        assert_eq!(fbu_rects(&mut c).await, 1);
+        assert_eq!(rect(&mut c).await, (4, 2, 0));
+
+        // The guest changes resolution to 6x3.
+        {
+            let mut g = shared.lock().unwrap();
+            g.fb = Framebuffer::new(6, 3);
+            g.generation += 1;
+        }
+
+        // The next update announces the resize and repaints at the new size.
+        c.write_all(&[3, 0, 0, 0, 0, 0, 0, 4, 0, 2]).await.unwrap();
+        assert_eq!(fbu_rects(&mut c).await, 2, "resize update carries DesktopSize + frame");
+        assert_eq!(rect(&mut c).await, (6, 3, -223), "first rect is DesktopSize at the new size");
+        assert_eq!(rect(&mut c).await, (6, 3, 0), "second rect is the full frame at the new size");
+
+        srv.abort();
     }
 }
