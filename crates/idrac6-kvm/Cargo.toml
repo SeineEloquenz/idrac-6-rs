@@ -20,7 +20,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.8", features = ["ws"], optional = true }
-tower-http = { version = "0.6", features = ["fs"], optional = true }
+tower-http = { version = "0.7", features = ["fs"], optional = true }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
