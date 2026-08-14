@@ -108,7 +108,8 @@ pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st
         .collect::<Vec<_>>()
         .join("; ");
     let epoch_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-    let title = form_encode(&format!("[{host}], Virtual Console, User:{user}"));
+    let raw_title = format!("[{host}], Virtual Console, User:{user}");
+    let title: String = form_urlencoded::byte_serialize(raw_title.as_bytes()).collect();
     let path = format!("/viewer.jnlp({host}@0@{title}@{epoch_ms}@ST1={st1})");
 
     info!(url = %path, "fetching viewer.jnlp");
@@ -120,19 +121,6 @@ pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st
         bail!("viewer.jnlp fetch returned HTTP {} but no jnlp body ({} bytes)", r.status, r.body.len());
     }
     Ok(body.into_owned())
-}
-
-/// application/x-www-form-urlencoded encoding (space -> `+`), for the jnlp URL title.
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// Full self-service flow: web login with account credentials, mint + parse the jnlp token.
@@ -225,6 +213,13 @@ mod tests {
     fn login_body_is_208_bytes_plain() {
         let body = build_login_body("root", "calvin", 0, 0, 1, None);
         assert_eq!(body.len(), 208);
+    }
+
+    #[test]
+    fn jnlp_title_encoding_matches_idrac_format() {
+        let raw = "[idrac-0.i.eloque.nz], Virtual Console, User:root";
+        let enc: String = form_urlencoded::byte_serialize(raw.as_bytes()).collect();
+        assert_eq!(enc, "%5Bidrac-0.i.eloque.nz%5D%2C+Virtual+Console%2C+User%3Aroot");
     }
 
     #[test]
