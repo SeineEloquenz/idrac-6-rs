@@ -51,6 +51,23 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
     };
     sock.write_all(&server_init(w, h)).await?;
 
+    let mut held = std::collections::HashSet::new();
+    let result = client_loop(&mut sock, &shared, &input, &mut held, (w, h)).await;
+    // Release any keys still held when the client vanished, so they don't stick on the guest.
+    for keysym in held.drain() {
+        let _ = input.send(Input::Key { down: false, keysym }).await;
+    }
+    result
+}
+
+/// The RFB client message loop, tracking which keys are down in `held` for stuck-key cleanup.
+async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
+    sock: &mut S,
+    shared: &SharedFb,
+    input: &mpsc::Sender<Input>,
+    held: &mut std::collections::HashSet<u32>,
+    (w, h): (u16, u16),
+) -> Result<()> {
     let mut last_gen = u64::MAX;
     let mut last_dims = (w, h); // size the client currently knows; DesktopSize keeps it in sync
     let mut desktopsize = false;
@@ -76,13 +93,18 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
             3 => {
                 let mut b = [0u8; 9]; // FramebufferUpdateRequest
                 sock.read_exact(&mut b).await?;
-                send_update(&mut sock, &shared, &mut last_gen, &mut last_dims, desktopsize).await?;
+                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize).await?;
             }
             4 => {
                 let mut b = [0u8; 7]; // KeyEvent: down(1)+pad(2)+keysym(4)
                 sock.read_exact(&mut b).await?;
                 let down = b[0] != 0;
                 let keysym = u32::from_be_bytes([b[3], b[4], b[5], b[6]]);
+                if down {
+                    held.insert(keysym);
+                } else {
+                    held.remove(&keysym);
+                }
                 // send (not try_send): never drop a key event — a lost key-up sticks a key.
                 let _ = input.send(Input::Key { down, keysym }).await;
             }
@@ -111,7 +133,7 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
                 // into the guest. The extended-clipboard format uses a negative length and a
                 // different layout, which we don't advertise, so it is consumed and ignored.
                 if raw_len > 0 {
-                    paste_text(&text, &input).await;
+                    paste_text(&text, input).await;
                 }
             }
             other => anyhow::bail!("unknown RFB client message {other}"),
@@ -347,6 +369,46 @@ mod tests {
         assert_eq!(fbu_rects(&mut c).await, 2, "resize update carries DesktopSize + frame");
         assert_eq!(rect(&mut c).await, (6, 3, -223), "first rect is DesktopSize at the new size");
         assert_eq!(rect(&mut c).await, (6, 3, 0), "second rect is the full frame at the new size");
+
+        srv.abort();
+    }
+
+    /// Read past the RFB 3.8 handshake + ServerInit so the connection is ready for messages.
+    async fn handshake(c: &mut DuplexStream) {
+        let mut buf = [0u8; 12];
+        c.read_exact(&mut buf).await.unwrap();
+        c.write_all(b"RFB 003.008\n").await.unwrap();
+        c.read_exact(&mut [0u8; 2]).await.unwrap();
+        c.write_all(&[1]).await.unwrap();
+        c.read_exact(&mut [0u8; 4]).await.unwrap();
+        c.write_all(&[1]).await.unwrap();
+        let mut init = [0u8; 24];
+        c.read_exact(&mut init).await.unwrap();
+        let namelen = u32::from_be_bytes([init[20], init[21], init[22], init[23]]) as usize;
+        c.read_exact(&mut vec![0u8; namelen]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_keys_released_on_disconnect() {
+        let shared = crate::kvm::shared(4, 2);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::kvm::Input>(16);
+        let (mut c, server_end) = tokio::io::duplex(1 << 16);
+        let srv = tokio::spawn(serve_conn(server_end, shared, tx));
+        handshake(&mut c).await;
+
+        // Press 'a' (keysym 0x61) with no release, then disconnect.
+        c.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).await.unwrap(); // KeyEvent down
+        assert!(matches!(rx.recv().await.unwrap(), crate::kvm::Input::Key { down: true, keysym: 0x61 }));
+        drop(c); // client vanishes without sending the key-up
+
+        let released = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(
+            matches!(released, crate::kvm::Input::Key { down: false, keysym: 0x61 }),
+            "a key held at disconnect must be auto-released"
+        );
 
         srv.abort();
     }
