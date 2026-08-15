@@ -141,8 +141,8 @@ pub(super) async fn send_update<S: AsyncWrite + Unpin>(
         } else {
             let range = if first { None } else { g.take_dirty() };
             match range {
-                Some((lo, hi)) if hi > lo && hi <= len => {
-                    let (y0, y1) = (lo / width, (hi - 1) / width);
+                Some(r) if r.end > r.start && r.end <= len => {
+                    let (y0, y1) = (r.start / width, (r.end - 1) / width);
                     let pixels = g.fb.pixels[y0 * width..(y1 + 1) * width].to_vec();
                     Update::Rect { x: 0, y: y0 as u16, w: fw, h: (y1 - y0 + 1) as u16, pixels }
                 }

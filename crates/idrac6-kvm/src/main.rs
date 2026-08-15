@@ -63,38 +63,58 @@ struct ConnArgs {
     /// KVM credential (the jnlp `passwd` token; ignored when --jnlp is given).
     #[arg(long, env = "IDRAC_PASSWORD")]
     password: Option<String>,
-    /// Primary (video) channel port. iDRAC 6 on the R710 multiplexes everything on 5900.
-    #[arg(long, default_value_t = 5900)]
-    video_port: u16,
-    /// Keyboard/mouse channel port.
-    #[arg(long, default_value_t = 5900)]
-    kvm_port: u16,
+    /// Primary (video) channel port override. Defaults to the jnlp's `vport` (5900 on the R710).
+    #[arg(long)]
+    video_port: Option<u16>,
+    /// Keyboard/mouse channel port override. Defaults to the jnlp's `kmport`.
+    #[arg(long)]
+    kvm_port: Option<u16>,
     /// Request a plaintext channel (escape hatch; the R710 iDRAC 6 requires TLS).
     #[arg(long)]
     plaintext: bool,
 }
 
+/// How to obtain the KVM session, resolved from the mutually exclusive connection flags.
+enum ConnMode {
+    /// A pre-downloaded viewer.jnlp supplying host, user, token, and ports.
+    Jnlp(std::path::PathBuf),
+    /// Account credentials to mint a fresh KVM token via web login.
+    Credentials { host: String, user: String, password: String },
+}
+
 impl ConnArgs {
+    /// Resolve the connection mode. A supplied `--jnlp` takes precedence over credential flags.
+    fn mode(&self) -> Result<ConnMode> {
+        if let Some(path) = &self.jnlp {
+            return Ok(ConnMode::Jnlp(path.clone()));
+        }
+        Ok(ConnMode::Credentials {
+            host: self.host.clone().context("--host or --jnlp required")?,
+            user: self.user.clone().unwrap_or_else(|| "root".into()),
+            password: self.password.clone().context("--password/IDRAC_PASSWORD or --jnlp required")?,
+        })
+    }
+
     /// Resolve a KVM session: parse a supplied jnlp, or web-login with account credentials
     /// to mint a fresh KVM token.
     async fn session(&self) -> Result<auth::Session> {
-        if let Some(path) = &self.jnlp {
-            let xml = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-            return auth::parse_jnlp(&xml);
+        match self.mode()? {
+            ConnMode::Jnlp(path) => {
+                let xml = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+                auth::parse_jnlp(&xml)
+            }
+            ConnMode::Credentials { host, user, password } => {
+                info!(%host, %user, "web login to mint KVM token");
+                let mut s = auth::login_and_get_token(&host, &user, &password).await?;
+                if let Some(p) = self.video_port {
+                    s.video_port = p;
+                }
+                if let Some(p) = self.kvm_port {
+                    s.kvm_port = p;
+                }
+                Ok(s)
+            }
         }
-        let host = self.host.clone().context("--host or --jnlp required")?;
-        let user = self.user.clone().unwrap_or_else(|| "root".into());
-        let password = self.password.clone().context("--password/IDRAC_PASSWORD or --jnlp required")?;
-        info!(%host, %user, "web login to mint KVM token");
-        let mut s = auth::login_and_get_token(&host, &user, &password).await?;
-        // Honor explicit port overrides.
-        if self.video_port != 5900 {
-            s.video_port = self.video_port;
-        }
-        if self.kvm_port != 5900 {
-            s.kvm_port = self.kvm_port;
-        }
-        Ok(s)
     }
 }
 

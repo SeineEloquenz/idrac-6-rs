@@ -11,6 +11,7 @@
 //! advances it to the changed region.
 
 use super::Framebuffer;
+use std::ops::Range;
 
 /// RGB555 (0bRRRRRGGGGGBBBBB) -> 0xFFRRGGBB, matching d/c.java's LUT.
 #[inline]
@@ -34,7 +35,7 @@ impl Decoder {
     /// Decode one frame payload into `fb` (persistent across frames). Returns the op count and
     /// the changed pixel span as a half-open linear index range (`None` if nothing was written).
     /// `skip` advances the cursor without writing, so the span bounds the actual damage.
-    pub fn decode_frame(&mut self, p: &[u8], fb: &mut Framebuffer) -> (usize, Option<(usize, usize)>) {
+    pub fn decode_frame(&mut self, p: &[u8], fb: &mut Framebuffer) -> (usize, Option<Range<usize>>) {
         self.cursor = 0;
         let len = fb.pixels.len();
         let mut o = 0usize;
@@ -106,7 +107,7 @@ impl Decoder {
                 dmax = dmax.max(self.cursor);
             }
         }
-        let dirty = (dmax > dmin).then_some((dmin, dmax));
+        let dirty = (dmax > dmin).then_some(dmin..dmax);
         (ops, dirty)
     }
 
@@ -162,7 +163,7 @@ mod tests {
         // skip 5, then 3 white RGB555 literals -> damage is exactly [5, 8).
         let payload = [0x05u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let (_, dirty) = dec.decode_frame(&payload, &mut fb);
-        assert_eq!(dirty, Some((5, 8)));
+        assert_eq!(dirty, Some(5..8));
     }
 
     #[test]

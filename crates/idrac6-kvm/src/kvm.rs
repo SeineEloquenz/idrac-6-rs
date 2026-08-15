@@ -2,6 +2,7 @@
 //! framebuffer while pumping frame requests and forwarding input.
 
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,20 +22,20 @@ use crate::video::{decoder::Decoder, Framebuffer};
 pub struct FbState {
     pub fb: Framebuffer,
     pub generation: u64,
-    dirty: Option<(usize, usize)>,
+    dirty: Option<Range<usize>>,
 }
 
 impl FbState {
     /// Union a decoded frame's changed span into the pending damage.
-    pub fn mark_dirty(&mut self, (lo, hi): (usize, usize)) {
-        self.dirty = Some(match self.dirty {
-            Some((a, b)) => (a.min(lo), b.max(hi)),
-            None => (lo, hi),
+    pub fn mark_dirty(&mut self, range: Range<usize>) {
+        self.dirty = Some(match self.dirty.take() {
+            Some(cur) => cur.start.min(range.start)..cur.end.max(range.end),
+            None => range,
         });
     }
 
     /// Take and clear the pending damage span.
-    pub fn take_dirty(&mut self) -> Option<(usize, usize)> {
+    pub fn take_dirty(&mut self) -> Option<Range<usize>> {
         self.dirty.take()
     }
 }
