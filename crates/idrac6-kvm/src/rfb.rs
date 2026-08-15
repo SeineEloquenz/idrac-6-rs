@@ -9,7 +9,8 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::kvm::{Input, SharedFb};
+use crate::input::Input;
+use crate::kvm::SharedFb;
 
 const ENC_RAW: i32 = 0;
 const ENC_ZLIB: i32 = 6;
@@ -494,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn desktopsize_announced_on_resolution_change() {
         let shared = crate::kvm::shared(4, 2);
-        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::kvm::Input>(4);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<crate::input::Input>(4);
         let (mut c, server_end) = tokio::io::duplex(1 << 16);
         let srv = tokio::spawn(serve_conn(server_end, shared.clone(), tx));
 
@@ -556,14 +557,14 @@ mod tests {
     #[tokio::test]
     async fn held_keys_released_on_disconnect() {
         let shared = crate::kvm::shared(4, 2);
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::kvm::Input>(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::input::Input>(16);
         let (mut c, server_end) = tokio::io::duplex(1 << 16);
         let srv = tokio::spawn(serve_conn(server_end, shared, tx));
         handshake(&mut c).await;
 
         // Press 'a' (keysym 0x61) with no release, then disconnect.
         c.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).await.unwrap(); // KeyEvent down
-        assert!(matches!(rx.recv().await.unwrap(), crate::kvm::Input::Key { down: true, keysym: 0x61 }));
+        assert!(matches!(rx.recv().await.unwrap(), crate::input::Input::Key { down: true, keysym: 0x61 }));
         drop(c); // client vanishes without sending the key-up
 
         let released = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -571,7 +572,7 @@ mod tests {
             .expect("timed out")
             .expect("channel closed");
         assert!(
-            matches!(released, crate::kvm::Input::Key { down: false, keysym: 0x61 }),
+            matches!(released, crate::input::Input::Key { down: false, keysym: 0x61 }),
             "a key held at disconnect must be auto-released"
         );
 

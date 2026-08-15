@@ -5,6 +5,7 @@
 pub mod apcp;
 pub mod auth;
 pub mod http;
+pub mod input;
 pub mod kvm;
 pub mod rfb;
 pub mod tls;

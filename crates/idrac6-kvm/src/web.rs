@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
-use crate::{auth, kvm, rfb};
+use crate::{auth, input, kvm, rfb};
 
 const COOKIE: &str = "idrac6_session";
 // noVNC resolves its `path` relative to the page URL, so the viewer must sit at the web root
@@ -36,7 +36,7 @@ const VIEWER_URL: &str = "/vnc.html?path=websockify&autoconnect=true&resize=scal
 struct Backend {
     token: String,
     shared: kvm::SharedFb,
-    input: mpsc::Sender<kvm::Input>,
+    input: mpsc::Sender<input::Input>,
     task: JoinHandle<()>,
     host: String,
     cookies: Vec<(String, String)>,
