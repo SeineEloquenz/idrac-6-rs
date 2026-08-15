@@ -11,6 +11,5 @@ jobs:
     permissions:
       contents: read
       packages: write
-# TODO offer a docker image
-#    with:
-#      images: '["todo"]'
+    with:
+      images: '["serve-image", "web-image"]'
