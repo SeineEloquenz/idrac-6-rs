@@ -65,6 +65,14 @@ pub type Refresh = Box<
 
 const MAX_FAILS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Reject frames larger than this. The console tops out at 1024x768; a bigger resolution is
+/// malformed or hostile and would drive a huge framebuffer allocation.
+const MAX_DIM: u16 = 4096;
+
+/// Whether a reported frame resolution is within the bounds worth allocating for.
+fn resolution_ok(res: crate::video::hb::Resolution) -> bool {
+    (1..=MAX_DIM).contains(&res.width) && (1..=MAX_DIM).contains(&res.height)
+}
 
 /// Build a [`Refresh`] that re-mints a KVM token from a still-valid web session (cookies + ST1),
 /// reusing that one web session so reconnects don't leak sessions toward the appliance's limit.
@@ -232,7 +240,7 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
                     hb_count = 0;
                 }
                 if let Some((res, payload)) = reassembler.push(&pkt.body) {
-                    if res.width > 0 && res.height > 0 {
+                    if resolution_ok(res) {
                         decode_into_fb(
                             shared,
                             &mut dec,
@@ -244,6 +252,12 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
                         if frames_decoded.is_multiple_of(300) {
                             info!(frames_decoded, "video frames decoded");
                         }
+                    } else {
+                        warn!(
+                            width = res.width,
+                            height = res.height,
+                            "ignoring frame with implausible resolution"
+                        );
                     }
                 }
             }
@@ -288,10 +302,27 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{shared, supervise, Refresh};
+    use super::{resolution_ok, shared, supervise, Refresh};
+    use crate::video::hb::Resolution;
     use idrac6_proto::auth;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn rejects_implausible_resolution() {
+        assert!(resolution_ok(Resolution {
+            width: 1024,
+            height: 768
+        }));
+        assert!(!resolution_ok(Resolution {
+            width: 0,
+            height: 768
+        }));
+        assert!(!resolution_ok(Resolution {
+            width: 65535,
+            height: 65535
+        }));
+    }
 
     #[tokio::test]
     async fn supervisor_stops_on_fatal_refresh() {
