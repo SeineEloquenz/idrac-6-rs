@@ -64,7 +64,7 @@ pub async fn send_video_start<S: AsyncWrite + Unpin>(s: &mut S, width: u16, heig
     Ok(())
 }
 
-/// `n()` (type 769) — sent once the appliance reports the screen resolution (`r.b()`).
+/// `n()` (type 769), sent once the appliance reports the screen resolution (`r.b()`).
 pub async fn send_resolution_ack<S: AsyncWrite + Unpin>(s: &mut S) -> Result<()> {
     write_packet(s, 769, &[0u8; 8]).await
 }
@@ -76,8 +76,8 @@ pub async fn send_frame_ack<S: AsyncWrite + Unpin>(s: &mut S, count: u8) -> Resu
     write_packet(s, 0, &[count, 0, 0, 0, 0, 0, 0, 0]).await
 }
 
-/// `ac` (type 1) — sent on the second (media) channel to bind it to the authenticated
-/// session, carrying the login session id `c` (=`C`) and `d` (=`D`, 0 here). Both big-endian.
+/// `ac` (type 1), sent on the second (media) channel to bind it to the authenticated session,
+/// carrying the login session id `c` (=`C`) and `d` (=`D`, 0 here). Both big-endian.
 pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Result<()> {
     let mut body = [0u8; 8];
     body[0..4].copy_from_slice(&c.to_be_bytes());

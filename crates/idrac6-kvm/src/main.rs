@@ -213,7 +213,6 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
 
     let (mut rd1, mut wr1) = tokio::io::split(ch1);
 
-    // Wait for the login response on channel 1.
     loop {
         let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(&mut rd1))
             .await

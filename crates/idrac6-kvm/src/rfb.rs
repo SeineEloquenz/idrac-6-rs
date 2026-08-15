@@ -121,7 +121,7 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 } else {
                     held.remove(&keysym);
                 }
-                // send (not try_send): never drop a key event — a lost key-up sticks a key.
+                // send (not try_send) so a key event is never dropped. A lost key-up sticks a key.
                 let _ = input.send(Input::Key { down, keysym }).await;
             }
             5 => {
@@ -145,9 +145,9 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 let mut text = vec![0u8; n];
                 sock.read_exact(&mut text).await?;
-                // Basic ClientCutText (positive length) is Latin-1 text the user pasted; type it
-                // into the guest. The extended-clipboard format uses a negative length and a
-                // different layout, which we don't advertise, so it is consumed and ignored.
+                // Positive length is basic Latin-1 clipboard text, typed into the guest. The
+                // extended-clipboard format (negative length, different layout) is one we do not
+                // advertise, so it is consumed and ignored.
                 if raw_len > 0 {
                     paste_text(&text, input).await;
                 }
@@ -157,10 +157,9 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// Type pasted clipboard text into the guest as keystrokes (the iDRAC carries only keyboard and
-/// mouse, so paste is synthesized typing). Latin-1 printables map to their keysym; the existing
-/// input path adds Shift where needed. Paced so the guest registers each key rather than
-/// coalescing a burst into dropped characters.
+/// Type pasted clipboard text into the guest as keystrokes, since the iDRAC carries only keyboard
+/// and mouse. Latin-1 printables map to their keysym and the input path adds Shift where needed.
+/// Paced so the guest registers each key instead of coalescing a burst into dropped characters.
 async fn paste_text(text: &[u8], input: &mpsc::Sender<Input>) {
     for &c in text {
         let Some(keysym) = paste_keysym(c) else { continue };

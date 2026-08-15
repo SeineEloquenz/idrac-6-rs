@@ -1,6 +1,6 @@
 //! iDRAC 6 `hb` (0x0081) video codec, ported from `com/avocent/kvm/d/b.java` (RLE driver)
 //! and `com/avocent/kvm/d/c.java` (RGB555 literals). It is byte-oriented over a linear
-//! framebuffer cursor — not the block-JPEG path (that is the separate `gb` codec).
+//! framebuffer cursor, not the block-JPEG path (the separate `gb` codec).
 //!
 //! Each op is the top 3 bits of a byte; the low 5 bits start a run length that extends
 //! across following bytes sharing the same op (`run`). Ops:
@@ -110,9 +110,9 @@ impl Decoder {
         (ops, dirty)
     }
 
-    /// Two-colour pattern fill (f() in d/b.java): 4 pixels from the op byte's low nibble,
-    /// then, if bit4 is set, 7 pixels per following byte while bit7 stays set. Colour `a` is
-    /// the left pixel; colour `b` is the most recent different pixel.
+    /// Two-colour pattern fill (f() in d/b.java). Emits 4 pixels from the op byte's low nibble,
+    /// then, if bit4 is set, 7 pixels per following byte while bit7 stays set. Colour `a` is the
+    /// left pixel, `b` the most recent different pixel.
     fn pattern(&mut self, p: &[u8], o: &mut usize, first: u8, fb: &mut Framebuffer) {
         let len = fb.pixels.len();
         let a = if self.cursor > 0 { fb.pixels[self.cursor - 1] } else { 0xFF00_0000 };

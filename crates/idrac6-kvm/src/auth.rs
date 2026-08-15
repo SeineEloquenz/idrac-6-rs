@@ -1,9 +1,10 @@
 //! iDRAC 6 KVM authentication.
 //!
-//! The jnlp passes `user`/`passwd` directly, and the applet authenticates with a
-//! "Login Request" APCP packet (type 256, or 258 "extended" for protocol >= 2), built in
-//! `com/avocent/kvm/b/a/ab.java` and sent from `com/avocent/kvm/b/r.java`. There is no
-//! separate web-login / token step for this firmware.
+//! KVM does not accept the account password directly. It needs a rotating one-time token the
+//! iDRAC mints per Virtual Console launch, which [`login_and_get_token`] reproduces (web login,
+//! then fetch a fresh `viewer.jnlp`). A pre-downloaded jnlp can be parsed instead. The token
+//! goes to the appliance in an APCP Login Request (type 256, or 258 extended for protocol >= 2),
+//! from `com/avocent/kvm/b/a/ab.java`.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,10 +28,8 @@ pub struct Session {
     pub web_st1: Option<String>,
 }
 
-/// Parse a `viewer.jnlp` into a session. On this firmware `passwd` is a rotating,
-/// server-minted one-time KVM token (the account password is not accepted for KVM), so a
-/// freshly downloaded jnlp is the reliable credential source until the web-login flow is
-/// automated.
+/// Parse a `viewer.jnlp` into a session. Its `passwd` is the rotating one-time KVM token, not
+/// the account password.
 pub fn parse_jnlp(xml: &str) -> Result<Session> {
     let mut args: HashMap<&str, &str> = HashMap::new();
     for chunk in xml.split("<argument>").skip(1) {
@@ -59,8 +58,8 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(xml[start..end].trim())
 }
 
-/// A login failure the caller can act on. The web UI maps each to an HTTP status; everything
-/// that is not a distinct iDRAC verdict (network, jnlp, parsing) stays an opaque `Other`.
+/// A login failure the caller can act on. The web UI maps each variant to an HTTP status.
+/// Anything that is not a distinct iDRAC verdict (network, jnlp, parsing) stays an opaque `Other`.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("maximum iDRAC sessions reached; wait for old sessions to time out or clear them, then retry")]
@@ -106,10 +105,10 @@ pub async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(S
     Ok((cookies, st1))
 }
 
-/// Fetch a freshly minted `viewer.jnlp` for an authenticated session. The iDRAC 6 URL is
-/// `/viewer.jnlp(<host>@0@<url-encoded-title>@<epoch_ms>@ST1=<token>)`: args are `@`-joined
-/// inside literal parens, the title is form-encoded, and the ST1 session token authorizes
-/// the request (the session cookie alone yields 401).
+/// Fetch a freshly minted `viewer.jnlp` for an authenticated session. The iDRAC 6 URL packs its
+/// args `@`-joined inside literal parens, `/viewer.jnlp(<host>@0@<title>@<epoch_ms>@ST1=<token>)`,
+/// with the title form-encoded and the ST1 token authorizing the request (the cookie alone yields
+/// 401).
 pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st1: Option<&str>) -> Result<String> {
     let st1 = st1.context("no ST1 token from login; cannot authorize viewer.jnlp")?;
     let cookie_hdr = cookies
@@ -133,8 +132,8 @@ pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st
     Ok(body.into_owned())
 }
 
-/// Full self-service flow: web login with account credentials, mint + parse the jnlp token.
-/// The returned session carries the web cookies/ST1 so the caller can [`web_logout`].
+/// Web login with the account credentials, then mint and parse the jnlp token. The returned
+/// session carries the web cookies and ST1 so the caller can [`web_logout`].
 pub async fn login_and_get_token(host: &str, user: &str, password: &str) -> Result<Session, AuthError> {
     let (cookies, st1) = web_login(host, user, password).await?;
     info!(cookies = cookies.len(), st1 = st1.is_some(), "web login ok");

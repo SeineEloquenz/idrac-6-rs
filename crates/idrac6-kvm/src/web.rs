@@ -1,6 +1,6 @@
 //! Self-serve web mode. A login page authenticates with the iDRAC account credentials, opens
 //! the KVM backend, and serves noVNC over an in-process RFB-over-WebSocket bridge. No secret is
-//! stored on the server: the iDRAC credentials entered in the browser are the only credential.
+//! stored on the server. The iDRAC credentials entered in the browser are the only credential.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -154,8 +154,8 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
         last_active: Mutex::new(Instant::now()),
     });
 
-    // A new login takes over the single console; release the previous session (matches the
-    // appliance's single input-session model).
+    // A new login takes over the single console, releasing the previous session (the appliance
+    // gives keyboard and mouse to only one session).
     if let Some(old) = st.backend.lock().await.replace(backend) {
         tokio::spawn(async move { old.teardown().await });
     }
@@ -210,7 +210,7 @@ async fn bridge(mut socket: WebSocket, backend: Arc<Backend>) {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(b))) => { if wr.write_all(&b).await.is_err() { break; } }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => {} // text/ping/pong: ignore (axum auto-replies to pings)
+                Some(Ok(_)) => {} // ignore text/ping/pong (axum auto-replies to pings)
             },
             r = rd.read(&mut buf) => match r {
                 Ok(0) | Err(_) => break,

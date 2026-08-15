@@ -1,98 +1,101 @@
 # idrac6-kvm
 
-A modern, Java-free replacement for the Dell iDRAC 6 KVM console (PowerEdge R710). It speaks
-iDRAC 6's native `APCP` protocol directly and re-exposes the remote console either as a standard
-**RFB/VNC** server (any VNC client works) or as a **self-serve web console**: a browser login
-page that authenticates with the iDRAC credentials themselves and serves noVNC. In web mode no
-secret is stored on the server — the iDRAC credentials entered in the browser are the only
-credential. noVNC assets come from nixpkgs, not bundled into the binary.
+idrac6-kvm is a modern, Java-free replacement for the remote console of Dell's iDRAC 6 (PowerEdge
+R710 and friends). The stock console ships only as a signed Java 7 applet that no current browser or
+JRE will run, which leaves the out-of-band console effectively dead. This tool speaks iDRAC 6's
+native `APCP` protocol directly and re-exposes the console as a plain VNC server or a self-serve web
+app, so any VNC client, or just a browser, gets you back to the screen.
 
-Scope: **KVM console** — video + keyboard + mouse. No virtual media / power / serial-over-LAN.
+Scope is the KVM console, meaning video, keyboard and mouse. There is no virtual media, power control
+or serial-over-LAN.
 
-## Status
+Features (non-exhaustive):
+* Plain RFB/VNC server that works with any VNC client
+* Self-serve web console with noVNC, where the iDRAC credentials are entered in the browser and no secret is stored on the server
+* Full software decode of the iDRAC 6 RLE/RGB555 video stream
+* Keyboard and absolute-pointer mouse, with Shift synthesis so on-screen and mobile keyboards work
+* Clipboard paste into the guest
+* Automatic reconnection with one-time-token re-minting
+* Zlib-compressed, dirty-rectangle framebuffer updates
+* Legacy TLS for the appliance's ancient stack, with no system-wide crypto downgrade
+* Nix packages, OCI images and NixOS modules for both the proxy and the web app
 
-Working end to end against a real R710:
+## Installation
 
-- Legacy TLS (OpenSSL, SECLEVEL 0) + `APCP` handshake — validated live
-- Automated auth: iDRAC web login → one-time KVM token → dual-channel login → logout
-- Video: decodes the RLE/RGB555 stream to a framebuffer — pixel-perfect
-- Output: minimal RFB 3.8 server — verified with an independent VNC client
-- Input: keyboard + absolute-pointer mouse → APCP (packet types 512/513)
-- Web mode: browser login gate + noVNC over an in-process RFB-over-WebSocket bridge
-
-## Build
+The project builds with [Nix](https://nixos.org). There are two flavours, a lean `serve` proxy and
+the `web` app.
 
 ```sh
-nix build            # -> ./result/bin/idrac6-kvm
-nix develop          # dev shell: cargo, rustc, openssl
-nix develop .#capture   # extra tools for the M0 capture spike (tigervnc, tshark)
-
-cargo build --no-default-features   # lean RFB/VNC proxy: drops the web UI + axum/tower/serde
+nix build github:SeineEloquenz/idrac-6-rs#serve   # RFB/VNC proxy
+nix build github:SeineEloquenz/idrac-6-rs#web     # self-serve web console
 ```
 
-A Cargo workspace under `crates/`: `idrac6-kvm` (a library plus the thin CLI binary) and the pure,
-dependency-free video codec crate `idrac6-video`. The self-serve web UI is behind the default-on
-`web` feature; disable it for a smaller RFB-only proxy.
-
-## Use
+Container images are published to GHCR on every push to `main`.
 
 ```sh
-# Web console: browser login with iDRAC credentials, serves noVNC. No secret on the CLI.
+# Web console, then open http://localhost:8080 and log in with the iDRAC account.
+docker run -p 8080:8080 -e IDRAC_HOST=192.0.2.10 \
+  ghcr.io/seineeloquenz/idrac-6-rs/web-image
+
+# RFB/VNC proxy, then: vncviewer localhost:5900
+docker run -p 5900:5900 -e IDRAC_HOST=192.0.2.10 -e IDRAC_PASSWORD=... \
+  ghcr.io/seineeloquenz/idrac-6-rs/serve-image
+```
+
+You can also build the binary with cargo. `--no-default-features` drops the web app and its
+dependencies for a smaller RFB-only proxy.
+
+```sh
+cargo build --release                          # both subcommands
+cargo build --release --no-default-features    # RFB/VNC proxy only
+```
+
+## Usage
+
+```sh
+# Self-serve web console. Credentials are entered in the browser, nothing is stored.
 NOVNC=$(nix build nixpkgs#novnc --no-link --print-out-paths)/share/webapps/novnc
-idrac6-kvm web --host <idrac-ip> --listen 127.0.0.1:8080 --novnc-root "$NOVNC"
-# then open http://127.0.0.1:8080/ and log in with the iDRAC account.
+idrac6-kvm web --host 192.0.2.10 --listen 127.0.0.1:8080 --novnc-root "$NOVNC"
 
-# Live console over plain RFB/VNC (for native VNC clients; the tool mints the KVM token itself).
-IDRAC_PASSWORD='…' idrac6-kvm serve --host <idrac-ip> --user root --listen 127.0.0.1:5900
-# then: vncviewer 127.0.0.1:5900
-
-# Debug: log the handshake + typed packets, optionally dumping the video for offline work.
-IDRAC_PASSWORD='…' idrac6-kvm capture --host <idrac-ip> --seconds 15 --dump frames.bin
-
-# Offline: decode a dump to a PPM, or serve it over RFB without touching the iDRAC.
-idrac6-kvm decode --input frames.bin --out frame.ppm
-idrac6-kvm serve  --replay frames.bin --listen 127.0.0.1:5900
+# Plain RFB/VNC for native clients. The tool mints the KVM token itself.
+IDRAC_PASSWORD=... idrac6-kvm serve --host 192.0.2.10 --user root --listen 127.0.0.1:5900
 ```
 
-`web` serves plain HTTP: bind it to localhost behind a TLS reverse proxy, or to a trusted
-network — the browser sends the iDRAC credentials to it. For `serve`/`capture`, instead of
-`--host/--user/--password` you can pass `--jnlp viewer.jnlp` to use a token from a downloaded
-Virtual Console descriptor.
+Both listen on plain, unauthenticated transports, so bind them to localhost behind a TLS reverse
+proxy, reach them over an SSH tunnel, or bind only to a trusted network. `IDRAC_HOST`, `IDRAC_USER`,
+`IDRAC_PASSWORD` and `IDRAC_LISTEN` work in place of the flags. For `serve` you can also pass `--jnlp
+viewer.jnlp` with a token from a downloaded Virtual Console descriptor instead of an account
+password.
 
-## NixOS module
+Set the guest console to a US keymap. VNC keyboards are character-based rather than position-based
+and the tool maps to US HID usages, so a non-US console mis-maps symbols.
+
+## NixOS
+
+The flake exposes `nixosModules.serve`, `nixosModules.web` and `nixosModules.default`, which imports
+both.
 
 ```nix
-# flake.nix: inputs.idrac6-kvm.url = "path:/home/alexa/Projects/idrac-6";
-# configuration.nix:
-services.idrac6-kvm = {
+services.idrac6-kvm-web = {
   enable = true;
-  host = "192.0.2.10";        # non-secret; credentials are entered in the browser
-  user = "root";              # pre-filled on the login form
-  listen = "127.0.0.1:8080";  # plain HTTP — front with a TLS reverse proxy
-  idleTimeout = 600;          # release the KVM session after 10 min idle
+  host = "192.0.2.10";        # non-secret, credentials are entered in the browser
+  listen = "127.0.0.1:8080";  # plain HTTP, front with a TLS reverse proxy
+};
+
+services.idrac6-kvm-serve = {
+  enable = true;
+  host = "192.0.2.10";
+  passwordFile = "/run/secrets/idrac";   # loaded as a systemd credential at runtime
 };
 ```
 
-Front it with nginx/Caddy for TLS, e.g. `services.nginx.virtualHosts."kvm.example"` proxying to
-`http://127.0.0.1:8080` (pass through the `/websockify` WebSocket upgrade).
-
 ## How it works
 
-`serve` logs into the iDRAC web UI to mint a one-time KVM token, opens the APCP control
-channel (TLS) and authenticates, then opens the media channel and drives the video handshake.
-Incoming `hb` tiles are RLE/RGB555-decoded (`crates/idrac6-video`, ported from the applet's
-`com/avocent/kvm/d/b.java` + `d/c.java`) into a shared framebuffer that the RFB server streams
-to clients. RFB key/pointer events are translated to APCP keyboard (`f`, type 512) and mouse
-(`gc`, type 513) packets.
+Both modes log into the iDRAC web UI to mint a one-time KVM token, open the APCP control channel over
+legacy TLS and authenticate, then open the media channel and drive the video handshake. Incoming
+tiles are RLE/RGB555-decoded into a shared framebuffer that the RFB server streams to clients, and
+RFB key and pointer events are translated back to APCP keyboard and mouse packets. In web mode the
+browser talks noVNC to an in-process RFB-over-WebSocket bridge.
 
-Keyboard: RFB key events carry X11 keysyms (characters), mapped to USB HID usages for a **US**
-guest layout. Shift is synthesized for characters that need it (uppercase, `!@#`, `_+{}|:"<>?~`)
-so on-screen/mobile keyboards, which send the character without a Shift event, still work. Set
-the guest console keymap to US so the characters land correctly (a non-US console will mis-map
-symbols, since VNC is character-based, not position-based).
-
-## Origin
-
-Reverse-engineered from the decompiled `avctKVM.jar` for interoperability with hardware you own.
-The video codec and protocol are pure-Java in the applet (the shipped `.so` files are only X11
-keyboard-passthrough and local drive access, neither needed here).
+The codec and protocol were reverse-engineered from the decompiled `avctKVM.jar` for interoperability
+with hardware you own. Both are pure Java in the applet, so no native code was needed.

@@ -270,9 +270,8 @@ fn decode_into_fb(shared: &SharedFb, dec: &mut Option<Decoder>, payload: &[u8], 
     }
 }
 
-/// Convenience wrapper used by `serve`/`web`: build the shared fb, spawn the supervisor (which
-/// connects, decodes, and reconnects on drops), and hand back the shared fb, an input sender, and
-/// the supervisor task handle (abort it to stop the session and reconnect loop).
+/// Build the shared framebuffer and spawn the reconnect supervisor. Returns the framebuffer, an
+/// input sender, and the supervisor task handle (abort it to stop the session and reconnect loop).
 pub fn spawn(refresh: Refresh, initial: auth::Session) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
     let shared = shared(1024, 768);
     let (tx, rx) = mpsc::channel(256);
