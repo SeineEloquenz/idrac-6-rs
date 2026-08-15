@@ -65,8 +65,7 @@ pub type Refresh = Box<
 
 const MAX_FAILS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// Reject frames larger than this. The console tops out at 1024x768; a bigger resolution is
-/// malformed or hostile and would drive a huge framebuffer allocation.
+/// Maximum frame dimension accepted before allocating a framebuffer.
 const MAX_DIM: u16 = 4096;
 
 /// Whether a reported frame resolution is within the bounds worth allocating for.

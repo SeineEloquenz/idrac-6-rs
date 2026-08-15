@@ -32,13 +32,16 @@ nix build github:SeineEloquenz/idrac-6-rs#web     # self-serve web console
 
 Container images are published to GHCR on every push to `main`.
 
+The images bind `0.0.0.0` inside the container, so publish the port to localhost only (or a trusted
+interface) and never straight to a public one. See [Security](#security).
+
 ```sh
 # Web console, then open http://localhost:8080 and log in with the iDRAC account.
-docker run -p 8080:8080 -e IDRAC_HOST=192.0.2.10 \
+docker run -p 127.0.0.1:8080:8080 -e IDRAC_HOST=192.0.2.10 \
   ghcr.io/seineeloquenz/idrac-6-rs/web-image
 
 # RFB/VNC proxy, then: vncviewer localhost:5900
-docker run -p 5900:5900 -e IDRAC_HOST=192.0.2.10 -e IDRAC_PASSWORD=... \
+docker run -p 127.0.0.1:5900:5900 -e IDRAC_HOST=192.0.2.10 -e IDRAC_PASSWORD=... \
   ghcr.io/seineeloquenz/idrac-6-rs/serve-image
 ```
 
@@ -86,6 +89,21 @@ services.idrac6-kvm-serve = {
   passwordFile = "/run/secrets/idrac";   # loaded as a systemd credential at runtime
 };
 ```
+
+## Security
+
+* The RFB/VNC server is **unauthenticated** (RFB Security = None). Anyone who can reach the port has
+  full keyboard, mouse and video, which for a KVM console means full control of the host. Bind it to
+  localhost and reach it over an SSH tunnel, or restrict it to a trusted network. The container image
+  binds `0.0.0.0` inside the container, so publish it as `-p 127.0.0.1:5900:5900`, never `-p 5900:5900`.
+* The web console serves plain HTTP, so put a TLS reverse proxy in front and reach it over HTTPS, or
+  keep it on localhost. For the browser console the proxy must forward the original `Host` header
+  (standard for WebSocket proxying), otherwise the same-origin WebSocket check rejects the viewer.
+* The appliance's TLS is legacy (1024-bit cert) and is negotiated at OpenSSL security level 0 with
+  certificate verification disabled, because iDRAC 6 offers nothing better. Treat the network path
+  between this proxy and the iDRAC as trusted, since an on-path attacker there can read the account
+  credential and the console stream. The downgrade is scoped to this connection and does not touch
+  the system-wide crypto policy.
 
 ## How it works
 

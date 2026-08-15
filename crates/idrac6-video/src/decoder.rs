@@ -112,8 +112,8 @@ impl Decoder {
                     }
                 }
             }
-            // Literal and pattern ops advance the cursor without a length check; clamp it so a
-            // crafted frame can't run it past the end and panic the next op's indexing.
+            // Literal and pattern ops advance the cursor unchecked. Clamp so a crafted frame cannot
+            // run it past the end and panic the next op's indexing.
             self.cursor = self.cursor.min(len);
             // Anything but `skip` (0x00) wrote pixels in [cur_before, cursor).
             if by & 0xE0 != 0x00 {
@@ -196,8 +196,7 @@ mod tests {
     fn cursor_overrun_frame_does_not_panic() {
         let mut fb = Framebuffer::new(8, 4); // 32 pixels
         let mut dec = Decoder::new(8, 4);
-        // Literals past the end (each 0x80,0x00) followed by a repeat op previously ran the cursor
-        // beyond len and panicked on the next op's indexing.
+        // 40 literals overrun the 32-pixel buffer, then a repeat op indexes relative to the cursor.
         let mut payload = [0x80u8, 0x00].repeat(40);
         payload.push(0x21);
         let _ = dec.decode_frame(&payload, &mut fb);

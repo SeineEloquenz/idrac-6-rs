@@ -34,6 +34,8 @@ const COOKIE: &str = "idrac6_session";
 // noVNC resolves its `path` relative to the page URL, so the viewer must sit at the web root
 // for `path=websockify` to reach `/websockify` (works with no explicit host and behind a proxy).
 const VIEWER_URL: &str = "/vnc.html?path=websockify&autoconnect=true&resize=scale&reconnect=true";
+/// Minimum spacing between login attempts, a global throttle against credential brute force.
+const MIN_LOGIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A live KVM backend plus the web-session handle needed to release it on the iDRAC.
 struct Backend {
@@ -62,6 +64,7 @@ struct AppState {
     default_user: String,
     idle_timeout: Duration,
     backend: Mutex<Option<Arc<Backend>>>,
+    login_gate: Mutex<Instant>,
 }
 
 impl AppState {
@@ -70,7 +73,9 @@ impl AppState {
         let token = cookie_value(headers, COOKIE)?;
         let guard = self.backend.lock().await;
         let b = guard.as_ref()?;
-        (b.token == token).then(|| b.clone())
+        let matches = b.token.len() == token.len()
+            && openssl::memcmp::eq(b.token.as_bytes(), token.as_bytes());
+        matches.then(|| b.clone())
     }
 }
 
@@ -89,13 +94,18 @@ pub(crate) async fn run(
         default_user: user,
         idle_timeout: Duration::from_secs(idle_secs),
         backend: Mutex::new(None),
+        login_gate: Mutex::new(
+            Instant::now()
+                .checked_sub(MIN_LOGIN_INTERVAL)
+                .unwrap_or_else(Instant::now),
+        ),
     });
     tokio::spawn(reaper(state.clone()));
 
     let app = Router::new()
         .route("/", get(root))
         .route("/login", post(login))
-        .route("/logout", get(logout).post(logout))
+        .route("/logout", post(logout))
         .route("/websockify", get(websockify))
         .fallback_service(ServeDir::new(&novnc_root))
         .with_state(state.clone());
@@ -132,6 +142,15 @@ struct LoginForm {
 }
 
 async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
+    {
+        let mut gate = st.login_gate.lock().await;
+        let wait = MIN_LOGIN_INTERVAL.saturating_sub(gate.elapsed());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        *gate = Instant::now();
+    }
+
     let user = if form.user.is_empty() {
         st.default_user.clone()
     } else {
@@ -211,6 +230,10 @@ async fn websockify(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
+    if !same_origin(&headers) {
+        warn!("websocket rejected: cross-origin request");
+        return (StatusCode::FORBIDDEN, "cross-origin request").into_response();
+    }
     match st.authed(&headers).await {
         Some(backend) => {
             info!("websocket upgrade for authenticated viewer");
@@ -330,6 +353,18 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Whether a WebSocket upgrade is same-origin. `Origin`, when present, must match `Host`.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let origin_host = origin.split_once("://").map_or(origin, |(_, h)| h);
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|host| host == origin_host)
+}
+
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     for h in headers.get_all(header::COOKIE) {
         let Ok(s) = h.to_str() else { continue };
@@ -346,7 +381,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn random_token() -> String {
     let mut b = [0u8; 32];
-    openssl::rand::rand_bytes(&mut b).ok();
+    openssl::rand::rand_bytes(&mut b).expect("openssl RNG failed");
     to_hex(&b)
 }
 
@@ -358,4 +393,42 @@ fn to_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_origin;
+    use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
+
+    fn headers(pairs: &[(HeaderName, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(k.clone(), HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn same_origin_allows_matching_host() {
+        let h = headers(&[
+            (header::HOST, "kvm.example.com"),
+            (header::ORIGIN, "https://kvm.example.com"),
+        ]);
+        assert!(same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_foreign_origin() {
+        let h = headers(&[
+            (header::HOST, "kvm.example.com"),
+            (header::ORIGIN, "https://evil.example.com"),
+        ]);
+        assert!(!same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_allows_absent_origin() {
+        let h = headers(&[(header::HOST, "kvm.example.com")]);
+        assert!(same_origin(&h));
+    }
 }

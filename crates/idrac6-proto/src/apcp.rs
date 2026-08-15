@@ -246,7 +246,7 @@ pub async fn read_packet<S: AsyncRead + Unpin>(s: &mut S) -> Result<Packet> {
 
 fn random_nonce() -> [u8; 32] {
     let mut b = [0u8; 32];
-    openssl::rand::rand_bytes(&mut b).ok();
+    openssl::rand::rand_bytes(&mut b).expect("openssl RNG failed");
     b
 }
 

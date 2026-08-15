@@ -125,7 +125,8 @@ pub async fn fetch_jnlp(
     let title: String = form_urlencoded::byte_serialize(raw_title.as_bytes()).collect();
     let path = format!("/viewer.jnlp({host}@0@{title}@{epoch_ms}@ST1={st1})");
 
-    info!(url = %path, "fetching viewer.jnlp");
+    // Do not log `path`. It carries the ST1 session token.
+    info!(%host, "fetching viewer.jnlp");
     let r = http::request(host, 443, "GET", &path, &[("Cookie", &cookie_hdr)], None)
         .await
         .context("GET viewer.jnlp")?;
@@ -243,7 +244,7 @@ fn cookie_header(cookies: &[(String, String)]) -> String {
 
 fn openssl_rand_u32() -> u32 {
     let mut b = [0u8; 4];
-    openssl::rand::rand_bytes(&mut b).ok();
+    openssl::rand::rand_bytes(&mut b).expect("openssl RNG failed");
     u32::from_be_bytes(b)
 }
 
