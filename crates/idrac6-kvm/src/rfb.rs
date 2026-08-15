@@ -3,12 +3,16 @@
 //! RFB-over-WebSocket pipe for the browser (noVNC). Input events are forwarded to the KVM session.
 
 use anyhow::{Context, Result};
+use flate2::{Compress, Compression, FlushCompress};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::kvm::{Input, SharedFb};
+
+const ENC_RAW: i32 = 0;
+const ENC_ZLIB: i32 = 6;
 
 pub async fn serve(listener: TcpListener, shared: SharedFb, input: mpsc::Sender<Input>) -> Result<()> {
     loop {
@@ -72,6 +76,7 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
     let mut last_dims = (w, h); // size the client currently knows; DesktopSize keeps it in sync
     let mut desktopsize = false;
     let mut pixfmt = PixelFormat::default();
+    let mut zlib: Option<Compress> = None; // persistent deflate stream once the client asks for Zlib
     let mut ty = [0u8; 1];
     loop {
         sock.read_exact(&mut ty).await?;
@@ -95,11 +100,15 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 if enc.chunks_exact(4).any(|c| c == [0xFF, 0xFF, 0xFF, 0x21]) {
                     desktopsize = true;
                 }
+                // Zlib (6) = the client can decode zlib-compressed rectangles.
+                if zlib.is_none() && enc.chunks_exact(4).any(|c| c == [0, 0, 0, 6]) {
+                    zlib = Some(Compress::new(Compression::default(), true));
+                }
             }
             3 => {
                 let mut b = [0u8; 9]; // FramebufferUpdateRequest
                 sock.read_exact(&mut b).await?;
-                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize, &pixfmt).await?;
+                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize, &pixfmt, zlib.as_mut()).await?;
             }
             4 => {
                 let mut b = [0u8; 7]; // KeyEvent: down(1)+pad(2)+keysym(4)
@@ -276,6 +285,7 @@ async fn send_update<S: AsyncWrite + Unpin>(
     last_dims: &mut (u16, u16),
     desktopsize: bool,
     fmt: &PixelFormat,
+    zlib: Option<&mut Compress>,
 ) -> Result<()> {
     // Wait up to ~1s for a new frame so idle clients don't busy-loop.
     let mut waited = 0;
@@ -327,27 +337,62 @@ async fn send_update<S: AsyncWrite + Unpin>(
             return Ok(());
         }
         Update::Resize { w, h, pixels } => {
-            msg.reserve(28 + pixels.len() * 4);
             msg.extend_from_slice(&[0u8, 0]); // FramebufferUpdate + padding
             msg.extend_from_slice(&2u16.to_be_bytes()); // 2 rectangles
             push_rect(&mut msg, 0, 0, w, h, -223); // DesktopSize pseudo-rect
-            push_rect(&mut msg, 0, 0, w, h, 0); // full Raw frame at the new size
-            for px in &pixels {
-                fmt.push(&mut msg, *px);
-            }
+            push_pixel_rect(&mut msg, (0, 0, w, h), &pixels, fmt, zlib);
         }
         Update::Rect { x, y, w, h, pixels } => {
-            msg.reserve(16 + pixels.len() * 4);
             msg.extend_from_slice(&[0u8, 0]);
             msg.extend_from_slice(&1u16.to_be_bytes());
-            push_rect(&mut msg, x, y, w, h, 0); // Raw
-            for px in &pixels {
-                fmt.push(&mut msg, *px); // 0xFFRRGGBB -> client pixel format
-            }
+            push_pixel_rect(&mut msg, (x, y, w, h), &pixels, fmt, zlib);
         }
     }
     sock.write_all(&msg).await?;
     Ok(())
+}
+
+/// Append a pixel rectangle: Raw, or Zlib (encoding 6) when the client's persistent zlib stream is
+/// present. Zlib is just the Raw pixel bytes deflated on a per-connection stream, which crushes the
+/// redundant console content.
+fn push_pixel_rect(msg: &mut Vec<u8>, (x, y, w, h): (u16, u16, u16, u16), pixels: &[u32], fmt: &PixelFormat, zlib: Option<&mut Compress>) {
+    let mut raw = Vec::with_capacity(pixels.len() * (fmt.bpp as usize / 8).max(1));
+    for &px in pixels {
+        fmt.push(&mut raw, px);
+    }
+    match zlib {
+        Some(z) => {
+            let mut zdata = Vec::with_capacity(raw.len() / 2 + 64);
+            deflate_sync(z, &raw, &mut zdata);
+            push_rect(msg, x, y, w, h, ENC_ZLIB);
+            msg.extend_from_slice(&(zdata.len() as u32).to_be_bytes());
+            msg.extend_from_slice(&zdata);
+        }
+        None => {
+            push_rect(msg, x, y, w, h, ENC_RAW);
+            msg.extend_from_slice(&raw);
+        }
+    }
+}
+
+/// Deflate `input` into `out` on the persistent `z` stream, sync-flushed so the client can inflate
+/// this rectangle now while keeping the stream context (dictionary) for the next one. A sync flush
+/// always emits a marker, so completion is detected by the flush leaving output room to spare
+/// (rather than by "no new output"); we reserve generously so that happens in one pass.
+fn deflate_sync(z: &mut Compress, input: &[u8], out: &mut Vec<u8>) {
+    let start = z.total_in();
+    loop {
+        out.reserve(input.len() + 128); // enough spare that a completed flush doesn't fill it
+        let consumed = (z.total_in() - start) as usize;
+        let spare = out.capacity() - out.len();
+        let before_out = z.total_out();
+        z.compress_vec(&input[consumed..], out, FlushCompress::Sync).expect("zlib deflate");
+        let all_in = (z.total_in() - start) as usize >= input.len();
+        let produced = (z.total_out() - before_out) as usize;
+        if all_in && produced < spare {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +400,34 @@ mod tests {
     use super::{paste_keysym, serve_conn, PixelFormat};
     use crate::video::Framebuffer;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    #[test]
+    fn zlib_rects_roundtrip_on_persistent_stream() {
+        use flate2::{Compress, Compression, Decompress, FlushDecompress};
+        let mut enc = Compress::new(Compression::default(), true);
+        let mut dec = Decompress::new(true);
+
+        // Each "rectangle" must decode against the shared, persistent inflate stream, in order.
+        for chunk in [&b"\x00\x00\x00\x00\xff\xff\xff\xff"[..], b"\x00\x00\x00\x00\xff\xff\xff\xfe", b"hello zlib hello zlib hello"] {
+            let mut z = Vec::new();
+            super::deflate_sync(&mut enc, chunk, &mut z);
+            assert!(z.len() < chunk.len() + 16); // sanity: not wildly expanding
+
+            let mut out = Vec::with_capacity(chunk.len());
+            let start = dec.total_in();
+            while out.len() < chunk.len() {
+                if out.len() == out.capacity() {
+                    out.reserve(chunk.len() - out.len() + 8);
+                }
+                let consumed = (dec.total_in() - start) as usize;
+                dec.decompress_vec(&z[consumed..], &mut out, FlushDecompress::Sync).unwrap();
+                if (dec.total_in() - start) as usize >= z.len() && out.len() < chunk.len() {
+                    break;
+                }
+            }
+            assert_eq!(out, chunk, "each zlib rect must round-trip on the persistent stream");
+        }
+    }
 
     #[test]
     fn pixel_format_encodes_to_client_layout() {

@@ -27,6 +27,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"], optional = true }
 form_urlencoded = "1"
+flate2 = "1"
 
 [features]
 default = ["web"]
