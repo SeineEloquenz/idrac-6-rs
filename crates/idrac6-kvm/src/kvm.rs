@@ -87,7 +87,7 @@ async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedF
             tokio::select! {
                 _ = keepalive.tick() => {
                     if let Some(w) = w_io.lock().await.as_mut() {
-                        let _ = apcp::write_packet(w, apcp::ptype::KEEPALIVE, &[0u8; 8]).await;
+                        let _ = apcp::write_packet(w, apcp::PacketType::Keepalive, &[0u8; 8]).await;
                     }
                 }
                 ev = input_rx.recv() => match ev {
@@ -200,17 +200,17 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
 
     while let Some((_chan, pkt)) = rx.recv().await {
         match pkt.kind {
-            apcp::ptype::CONFIG_REQUEST => {
+            apcp::PacketType::ConfigRequest => {
                 if let Some(w) = writer.lock().await.as_mut() {
                     apcp::send_video_start(w, 1024, 768).await.ok();
                 }
             }
-            apcp::ptype::RESOLUTION_REPORT => {
+            apcp::PacketType::ResolutionReport => {
                 if let Some(w) = writer.lock().await.as_mut() {
                     apcp::send_resolution_ack(w).await.ok();
                 }
             }
-            apcp::ptype::VIDEO_HB => {
+            apcp::PacketType::VideoHb => {
                 hb_count += 1;
                 if hb_count >= apcp::FLOW_CONTROL_WINDOW as u32 {
                     apcp::send_frame_ack(&mut wr2, hb_count as u8).await.ok();

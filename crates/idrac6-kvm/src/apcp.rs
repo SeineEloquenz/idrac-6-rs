@@ -27,74 +27,134 @@ pub enum ConnKind {
     Secondary = 4,
 }
 
-/// APCP session-packet type codes, from the applet's dispatch table
-/// (`com/avocent/kvm/b/a/a.java`). Requests are low numbers; the appliance's replies
-/// carry the high bit (e.g. login 256 -> reply 257; video 128.. -> 34304..). The trailing
-/// comment on each is the applet's symbol for it.
-pub mod ptype {
-    pub const FRAME_ACK: u16 = 0; // cb
-    pub const LINK: u16 = 1; // ac
-    pub const LOGIN: u16 = 256;
-    pub const LOGIN_REPLY: u16 = 257;
-    pub const LOGIN_EXT: u16 = 258;
-    pub const KEYBOARD: u16 = 512; // f
-    pub const POINTER: u16 = 513; // gc
-    pub const RESOLUTION_ACK: u16 = 769; // n
-    pub const SET_RESOLUTION: u16 = 770; // x
-    pub const VIDEO_START: u16 = 772; // o
-    pub const VIDEO_CONFIG: u16 = 782; // db
-    pub const KEEPALIVE: u16 = 1024; // p
-    pub const VIDEO_HB: u16 = 0x0081; // hb, video/screen tile
-    pub const CONFIG_REQUEST: u16 = 0x0084; // xb, appliance requests video config
-    pub const RESOLUTION_REPORT: u16 = 0x8201; // jb, appliance reports screen resolution
-    pub const LOGIN_RESPONSE_ALT: u16 = 0x8300; // vb
-    pub const LOGIN_RESPONSE: u16 = 0x8305; // vb
+/// An APCP session-packet type, from the applet's dispatch table (`com/avocent/kvm/b/a/a.java`).
+/// Requests are low numbers; the appliance's replies carry the high bit (login 256 -> reply 257;
+/// video 128.. -> 34304..). The trailing comment is the applet's symbol. Unrecognized codes read
+/// back as `Other`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PacketType {
+    FrameAck,         // cb, 0
+    Link,             // ac, 1
+    Login,            // 256
+    LoginReply,       // 257
+    LoginExt,         // 258
+    Keyboard,         // f, 512
+    Pointer,          // gc, 513
+    ResolutionAck,    // n, 769
+    SetResolution,    // x, 770
+    VideoStart,       // o, 772
+    VideoConfig,      // db, 782
+    Keepalive,        // p, 1024
+    VideoHb,          // hb, 0x0081
+    ConfigRequest,    // xb, 0x0084
+    ResolutionReport, // jb, 0x8201
+    LoginResponseAlt, // vb, 0x8300
+    LoginResponse,    // vb, 0x8305
+    Other(u16),
+}
+
+impl PacketType {
+    /// The wire code for this type.
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::FrameAck => 0,
+            Self::Link => 1,
+            Self::Login => 256,
+            Self::LoginReply => 257,
+            Self::LoginExt => 258,
+            Self::Keyboard => 512,
+            Self::Pointer => 513,
+            Self::ResolutionAck => 769,
+            Self::SetResolution => 770,
+            Self::VideoStart => 772,
+            Self::VideoConfig => 782,
+            Self::Keepalive => 1024,
+            Self::VideoHb => 0x0081,
+            Self::ConfigRequest => 0x0084,
+            Self::ResolutionReport => 0x8201,
+            Self::LoginResponseAlt => 0x8300,
+            Self::LoginResponse => 0x8305,
+            Self::Other(c) => c,
+        }
+    }
+
+    /// Resolve a wire code to its type, `Other` for anything unrecognized.
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            0 => Self::FrameAck,
+            1 => Self::Link,
+            256 => Self::Login,
+            257 => Self::LoginReply,
+            258 => Self::LoginExt,
+            512 => Self::Keyboard,
+            513 => Self::Pointer,
+            769 => Self::ResolutionAck,
+            770 => Self::SetResolution,
+            772 => Self::VideoStart,
+            782 => Self::VideoConfig,
+            1024 => Self::Keepalive,
+            0x0081 => Self::VideoHb,
+            0x0084 => Self::ConfigRequest,
+            0x8201 => Self::ResolutionReport,
+            0x8300 => Self::LoginResponseAlt,
+            0x8305 => Self::LoginResponse,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Human label for capture logging.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Login | Self::LoginExt => "LoginRequest",
+            Self::LoginReply | Self::LoginResponse | Self::LoginResponseAlt => "LoginResponse",
+            Self::FrameAck => "FrameRequest(cb)",
+            Self::Link => "Link(ac)",
+            Self::Keyboard => "Keyboard(f)",
+            Self::Pointer => "Pointer(gc)",
+            Self::ResolutionAck => "ResolutionAck(n)",
+            Self::SetResolution => "SetResolution(x)",
+            Self::VideoStart => "VideoStart(o)",
+            Self::VideoConfig => "VideoConfig(db)",
+            Self::Keepalive => "Keepalive(p)",
+            Self::VideoHb => "video/screen(hb)",
+            Self::ConfigRequest => "ConfigRequest(xb)",
+            Self::ResolutionReport => "ResolutionReport(jb)",
+            Self::Other(c) => match c {
+                128..=138 => "video/screen",
+                34304..=34314 => "video/screen(reply)",
+                _ => "?",
+            },
+        }
+    }
 }
 
 /// Media-channel flow-control window `W`: send a `cb` frame-ack after this many received video
 /// packets (per `r.B()`), or the appliance's send window drains and it goes quiet.
 pub const FLOW_CONTROL_WINDOW: u8 = 20;
 
-/// Human label for a packet type, for capture logging.
-pub fn ptype_name(t: u16) -> &'static str {
-    use self::ptype::*;
-    match t {
-        LOGIN | LOGIN_EXT => "LoginRequest",
-        LOGIN_REPLY | LOGIN_RESPONSE | LOGIN_RESPONSE_ALT => "LoginResponse",
-        FRAME_ACK => "FrameRequest(cb)",
-        RESOLUTION_ACK => "ResolutionAck(n)",
-        SET_RESOLUTION => "SetResolution",
-        VIDEO_START => "VideoStart(o)",
-        VIDEO_CONFIG => "VideoStart(db)",
-        128..=138 => "video/screen",
-        34304..=34314 => "video/screen(reply)",
-        _ => "?",
-    }
-}
-
 /// After a successful login the applet requests video by sending three packets (`y()` in
 /// `com/avocent/kvm/b/r.java`): db(true), the client resolution, and o(). Only then does the
 /// appliance stream frames.
 pub async fn send_video_start<S: AsyncWrite + Unpin>(s: &mut S, width: u16, height: u16) -> Result<()> {
-    write_packet(s, ptype::VIDEO_CONFIG, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // db(true)
+    write_packet(s, PacketType::VideoConfig, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // db(true)
     let mut res = [0u8; 8];
     res[0..2].copy_from_slice(&width.to_be_bytes());
     res[2..4].copy_from_slice(&height.to_be_bytes());
-    write_packet(s, ptype::SET_RESOLUTION, &res).await?; // x(width, height)
-    write_packet(s, ptype::VIDEO_START, &[0u8; 8]).await?; // o()
+    write_packet(s, PacketType::SetResolution, &res).await?; // x(width, height)
+    write_packet(s, PacketType::VideoStart, &[0u8; 8]).await?; // o()
     Ok(())
 }
 
 /// `n()` (type 769), sent once the appliance reports the screen resolution (`r.b()`).
 pub async fn send_resolution_ack<S: AsyncWrite + Unpin>(s: &mut S) -> Result<()> {
-    write_packet(s, ptype::RESOLUTION_ACK, &[0u8; 8]).await
+    write_packet(s, PacketType::ResolutionAck, &[0u8; 8]).await
 }
 
 /// `cb` flow-control ack (type 0), sent on the MEDIA channel every W=20 received video
 /// packets, per `r.B()`. Byte 0 carries the count of frames since the last ack; without it
 /// the appliance's send window drains and it goes quiet (or a wrong-channel flood stalls it).
 pub async fn send_frame_ack<S: AsyncWrite + Unpin>(s: &mut S, count: u8) -> Result<()> {
-    write_packet(s, ptype::FRAME_ACK, &[count, 0, 0, 0, 0, 0, 0, 0]).await
+    write_packet(s, PacketType::FrameAck, &[count, 0, 0, 0, 0, 0, 0, 0]).await
 }
 
 /// `ac` (type 1), sent on the second (media) channel to bind it to the authenticated session,
@@ -103,7 +163,7 @@ pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Resu
     let mut body = [0u8; 8];
     body[0..4].copy_from_slice(&c.to_be_bytes());
     body[4..8].copy_from_slice(&d.to_be_bytes());
-    write_packet(s, ptype::LINK, &body).await
+    write_packet(s, PacketType::Link, &body).await
 }
 
 /// A duplex stream that is either plaintext or TLS-wrapped.
@@ -209,16 +269,16 @@ pub const PKT_MAGIC: &[u8; 4] = b"BEEF";
 
 #[derive(Debug, Clone)]
 pub struct Packet {
-    pub kind: u16,
+    pub kind: PacketType,
     pub body: Vec<u8>,
 }
 
 /// Write a packet: `BEEF` + type + (8 + body.len()) + body.
-pub async fn write_packet<S: AsyncWrite + Unpin>(s: &mut S, kind: u16, body: &[u8]) -> Result<()> {
+pub async fn write_packet<S: AsyncWrite + Unpin>(s: &mut S, kind: PacketType, body: &[u8]) -> Result<()> {
     let total = (8 + body.len()) as u16;
     let mut frame = Vec::with_capacity(8 + body.len());
     frame.extend_from_slice(PKT_MAGIC);
-    frame.extend_from_slice(&kind.to_be_bytes());
+    frame.extend_from_slice(&kind.code().to_be_bytes());
     frame.extend_from_slice(&total.to_be_bytes());
     frame.extend_from_slice(body);
     s.write_all(&frame).await.context("write packet")?;
@@ -232,18 +292,42 @@ pub async fn write_packet<S: AsyncWrite + Unpin>(s: &mut S, kind: u16, body: &[u
 pub async fn read_packet<S: AsyncRead + Unpin>(s: &mut S) -> Result<Packet> {
     let mut hdr = [0u8; 8];
     s.read_exact(&mut hdr).await.context("read packet header")?;
-    let kind = u16::from_be_bytes([hdr[4], hdr[5]]);
+    let code = u16::from_be_bytes([hdr[4], hdr[5]]);
     let total = u16::from_be_bytes([hdr[6], hdr[7]]) as usize;
     if !(8..=65535).contains(&total) {
-        bail!("implausible packet length {total} (type {kind})");
+        bail!("implausible packet length {total} (type {code:#06x})");
     }
     let mut body = vec![0u8; total - 8];
     s.read_exact(&mut body).await.context("read packet body")?;
-    Ok(Packet { kind, body })
+    Ok(Packet { kind: PacketType::from_code(code), body })
 }
 
 fn random_nonce() -> [u8; 32] {
     let mut b = [0u8; 32];
     openssl::rand::rand_bytes(&mut b).ok();
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PacketType;
+
+    #[test]
+    fn known_types_round_trip_through_their_code() {
+        for kind in [
+            PacketType::FrameAck, PacketType::Link, PacketType::Login, PacketType::LoginReply,
+            PacketType::LoginExt, PacketType::Keyboard, PacketType::Pointer, PacketType::ResolutionAck,
+            PacketType::SetResolution, PacketType::VideoStart, PacketType::VideoConfig,
+            PacketType::Keepalive, PacketType::VideoHb, PacketType::ConfigRequest,
+            PacketType::ResolutionReport, PacketType::LoginResponseAlt, PacketType::LoginResponse,
+        ] {
+            assert_eq!(PacketType::from_code(kind.code()), kind);
+        }
+    }
+
+    #[test]
+    fn unknown_code_is_other() {
+        assert_eq!(PacketType::from_code(0x1234), PacketType::Other(0x1234));
+        assert_eq!(PacketType::Other(0x1234).code(), 0x1234);
+    }
 }

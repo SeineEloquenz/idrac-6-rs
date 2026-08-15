@@ -190,7 +190,7 @@ pub async fn send_login<S: AsyncWrite + Unpin>(
 ) -> Result<u32> {
     let r: u32 = (openssl_rand_u32() % 10_000_000).max(1);
     let body = build_login_body(user, password, 0, 0, r, extended.then_some(0));
-    let kind = if extended { apcp::ptype::LOGIN_EXT } else { apcp::ptype::LOGIN };
+    let kind = if extended { apcp::PacketType::LoginExt } else { apcp::PacketType::Login };
     apcp::write_packet(s, kind, &body).await?;
     Ok(r)
 }
@@ -202,7 +202,7 @@ pub async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
         let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(rd))
             .await
             .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
-        if matches!(pkt.kind, apcp::ptype::LOGIN_RESPONSE | apcp::ptype::LOGIN_RESPONSE_ALT) {
+        if matches!(pkt.kind, apcp::PacketType::LoginResponse | apcp::PacketType::LoginResponseAlt) {
             return match pkt.body.first() {
                 Some(0) => Ok(()),
                 other => bail!("login rejected (status {other:?})"),

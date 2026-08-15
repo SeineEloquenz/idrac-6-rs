@@ -267,8 +267,8 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
                     }
                     info!(
                         chan,
-                        type = format!("{:#06x}", pkt.kind),
-                        name = apcp::ptype_name(pkt.kind),
+                        type = format!("{:#06x}", pkt.kind.code()),
+                        name = pkt.kind.name(),
                         len = pkt.body.len(),
                         head = hex_prefix(&pkt.body, 32),
                         "pkt"
@@ -276,12 +276,12 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
                     // Reactive video-start, mirroring the applet's handlers:
                     match pkt.kind {
                         // xb -> y() sends db/x/o.
-                        apcp::ptype::CONFIG_REQUEST => {
+                        apcp::PacketType::ConfigRequest => {
                             info!("xb received -> sending video config (db/x/o)");
                             apcp::send_video_start(&mut wr1, 1024, 768).await.ok();
                         }
                         // jb -> b() sends n().
-                        apcp::ptype::RESOLUTION_REPORT => { apcp::send_resolution_ack(&mut wr1).await.ok(); }
+                        apcp::PacketType::ResolutionReport => { apcp::send_resolution_ack(&mut wr1).await.ok(); }
                         _ => {}
                     }
                 }
