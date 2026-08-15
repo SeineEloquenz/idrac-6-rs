@@ -1,0 +1,17 @@
+[package]
+name = "idrac6-kvm-web"
+version = "0.1.0"
+edition = "2021"
+description = "iDRAC 6 self-serve noVNC web console"
+
+[dependencies]
+idrac6-kvm = { path = "../idrac6-kvm" }
+idrac6-proto = { path = "../idrac6-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+openssl = "0.10"

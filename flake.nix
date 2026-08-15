@@ -8,21 +8,20 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
 
-      # The two paths are one binary gated by the `web` feature: `serve` is the lean RFB/VNC proxy,
-      # `web` adds the self-serve noVNC app (axum/tower/serde).
-      mkBin = pkgs: { pname, withWeb }: pkgs.rustPlatform.buildRustPackage {
+      # Two binary crates in the workspace: `idrac6-kvm-serve` is the lean RFB/VNC proxy,
+      # `idrac6-kvm-web` is the self-serve noVNC app (axum/tower/serde). Each pulls only its own
+      # dependencies, so the serve build never sees axum.
+      mkBin = pkgs: { pname, blurb }: pkgs.rustPlatform.buildRustPackage {
         inherit pname;
         version = "0.1.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs = [ pkgs.openssl ];
-        buildNoDefaultFeatures = !withWeb;
-        cargoBuildFlags = [ "--bin" pname ];
+        cargoBuildFlags = [ "-p" pname ];
         cargoTestFlags = [ "-p" "idrac6-kvm" ];
         meta = {
-          description = "Modern KVM console proxy for Dell iDRAC 6"
-            + (if withWeb then " (self-serve noVNC web app)" else " (RFB/VNC proxy)");
+          description = "Modern KVM console proxy for Dell iDRAC 6 " + blurb;
           mainProgram = pname;
         };
       };
@@ -30,8 +29,8 @@
     {
       packages = forAllSystems (pkgs:
         let
-          serve = mkBin pkgs { pname = "idrac6-kvm-serve"; withWeb = false; };
-          web = mkBin pkgs { pname = "idrac6-kvm-web"; withWeb = true; };
+          serve = mkBin pkgs { pname = "idrac6-kvm-serve"; blurb = "(RFB/VNC proxy)"; };
+          web = mkBin pkgs { pname = "idrac6-kvm-web"; blurb = "(self-serve noVNC web app)"; };
         in
         {
           inherit serve web;

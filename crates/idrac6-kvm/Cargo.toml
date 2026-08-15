@@ -2,33 +2,13 @@
 name = "idrac6-kvm"
 version = "0.1.0"
 edition = "2021"
-description = "Modern KVM console proxy for Dell iDRAC 6 (APCP to RFB/VNC)"
-autobins = false
-
-[[bin]]
-name = "idrac6-kvm-serve"
-path = "src/bin/serve.rs"
-
-[[bin]]
-name = "idrac6-kvm-web"
-path = "src/bin/web.rs"
-required-features = ["web"]
+description = "iDRAC 6 KVM proxy core: live session supervisor and RFB/VNC server"
 
 [dependencies]
 idrac6-proto = { path = "../idrac6-proto" }
 idrac6-video = { path = "../idrac6-video" }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "sync", "time", "signal"] }
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-axum = { version = "0.8", features = ["ws"], optional = true }
-tower-http = { version = "0.6", features = ["fs"], optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-openssl = { version = "0.10", optional = true }
 flate2 = "1"
-
-[features]
-default = ["web"]
-# The self-serve noVNC web app. Off = a lean RFB/VNC proxy without the axum/tower/serde stack.
-web = ["dep:axum", "dep:tower-http", "dep:serde", "dep:openssl"]

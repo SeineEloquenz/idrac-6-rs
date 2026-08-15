@@ -26,9 +26,9 @@ use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
-use super::rfb;
+use idrac6_kvm::server::rfb;
+use idrac6_kvm::session::{input, kvm};
 use idrac6_proto::auth;
-use crate::session::{input, kvm};
 
 const COOKIE: &str = "idrac6_session";
 // noVNC resolves its `path` relative to the page URL, so the viewer must sit at the web root
@@ -74,7 +74,7 @@ impl AppState {
     }
 }
 
-pub async fn run(host: String, user: String, listen: String, novnc_root: PathBuf, idle_secs: u64) -> Result<()> {
+pub(crate) async fn run(host: String, user: String, listen: String, novnc_root: PathBuf, idle_secs: u64) -> Result<()> {
     if !novnc_root.join("vnc.html").is_file() {
         warn!(root = %novnc_root.display(), "noVNC vnc.html not found under --novnc-root; the viewer will 404");
     }
@@ -96,7 +96,7 @@ pub async fn run(host: String, user: String, listen: String, novnc_root: PathBuf
 
     let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("bind {listen}"))?;
     info!(%listen, host = %state.host, "web UI listening (plain HTTP — front with a TLS reverse proxy)");
-    axum::serve(listener, app).with_graceful_shutdown(crate::shutdown_signal()).await?;
+    axum::serve(listener, app).with_graceful_shutdown(idrac6_kvm::shutdown_signal()).await?;
 
     if let Some(b) = state.backend.lock().await.take() {
         info!("shutting down; releasing KVM session");

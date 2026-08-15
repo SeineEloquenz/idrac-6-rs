@@ -477,17 +477,40 @@ name = "idrac6-kvm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
- "clap",
  "flate2",
  "idrac6-proto",
  "idrac6-video",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "idrac6-kvm-serve"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "idrac6-kvm",
+ "idrac6-proto",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "idrac6-kvm-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "idrac6-kvm",
+ "idrac6-proto",
  "openssl",
  "serde",
  "tokio",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

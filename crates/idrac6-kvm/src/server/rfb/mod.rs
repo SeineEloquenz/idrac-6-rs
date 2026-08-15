@@ -31,7 +31,7 @@ pub async fn serve(listener: TcpListener, shared: SharedFb, input: mpsc::Sender<
 }
 
 /// Run the RFB protocol over one duplex stream until it closes.
-pub(crate) async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
     mut sock: S,
     shared: SharedFb,
     input: mpsc::Sender<Input>,

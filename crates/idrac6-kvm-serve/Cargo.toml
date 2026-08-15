@@ -1,0 +1,13 @@
+[package]
+name = "idrac6-kvm-serve"
+version = "0.1.0"
+edition = "2021"
+description = "iDRAC 6 KVM console as an RFB/VNC proxy"
+
+[dependencies]
+idrac6-kvm = { path = "../idrac6-kvm" }
+idrac6-proto = { path = "../idrac6-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
