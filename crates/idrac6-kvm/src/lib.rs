@@ -15,6 +15,16 @@ pub mod web;
 /// The pure video codec + framebuffer, re-exported so `crate::video` paths keep resolving.
 pub use idrac6_video as video;
 
+/// Lowercase hex encoding of a byte slice.
+pub fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 /// Resolve on Ctrl-C (SIGINT) or SIGTERM, for graceful shutdown.
 pub async fn shutdown_signal() {
     let ctrl_c = async {

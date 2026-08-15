@@ -7,10 +7,10 @@
 //! from `com/avocent/kvm/b/a/ab.java`.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 use crate::{apcp, http};
@@ -111,11 +111,7 @@ pub async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(S
 /// 401).
 pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st1: Option<&str>) -> Result<String> {
     let st1 = st1.context("no ST1 token from login; cannot authorize viewer.jnlp")?;
-    let cookie_hdr = cookies
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let cookie_hdr = cookie_header(cookies);
     let epoch_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let raw_title = format!("[{host}], Virtual Console, User:{user}");
     let title: String = form_urlencoded::byte_serialize(raw_title.as_bytes()).collect();
@@ -149,7 +145,7 @@ pub async fn web_logout(host: &str, cookies: &[(String, String)], st1: Option<&s
     if cookies.is_empty() {
         return Ok(());
     }
-    let cookie_hdr = cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    let cookie_hdr = cookie_header(cookies);
     let path = match st1 {
         Some(st1) => format!("/data/logout?ST1={st1}"),
         None => "/data/logout".to_string(),
@@ -197,6 +193,27 @@ pub async fn send_login<S: AsyncWrite + Unpin>(
     let kind = if extended { apcp::ptype::LOGIN_EXT } else { apcp::ptype::LOGIN };
     apcp::write_packet(s, kind, &body).await?;
     Ok(r)
+}
+
+/// Read the control channel until the appliance's User Login Response arrives, returning once it
+/// reports success. Times out after 10s; a non-zero status byte is a rejection.
+pub async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
+    loop {
+        let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(rd))
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
+        if matches!(pkt.kind, apcp::ptype::LOGIN_RESPONSE | apcp::ptype::LOGIN_RESPONSE_ALT) {
+            return match pkt.body.first() {
+                Some(0) => Ok(()),
+                other => bail!("login rejected (status {other:?})"),
+            };
+        }
+    }
+}
+
+/// Join cookie name=value pairs into a `Cookie` request header value.
+fn cookie_header(cookies: &[(String, String)]) -> String {
+    cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
 fn openssl_rand_u32() -> u32 {

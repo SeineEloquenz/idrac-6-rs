@@ -213,18 +213,8 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
 
     let (mut rd1, mut wr1) = tokio::io::split(ch1);
 
-    loop {
-        let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(&mut rd1))
-            .await
-            .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
-        info!(chan = "ch1", type = format!("{:#06x}", pkt.kind), name = apcp::ptype_name(pkt.kind), len = pkt.body.len(), head = hex_prefix(&pkt.body, 24), "pkt");
-        if pkt.kind == 0x8305 || pkt.kind == 0x8300 {
-            match pkt.body.first() {
-                Some(0) => { info!("login OK"); break; }
-                other => anyhow::bail!("login rejected, status byte = {other:?}"),
-            }
-        }
-    }
+    auth::await_login_ok(&mut rd1).await?;
+    info!("login OK");
 
     // Channel 2 (type 4): media/video, bound to the session with the `ac` packet.
     info!(port = s.kvm_port, "opening media channel (type 4)");
@@ -261,7 +251,7 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
     loop {
         tokio::select! {
             _ = &mut stop => break,
-            _ = pump.tick() => { apcp::send_frame_ack(&mut wr1, 20).await.ok(); }
+            _ = pump.tick() => { apcp::send_frame_ack(&mut wr1, apcp::FLOW_CONTROL_WINDOW).await.ok(); }
             msg = rx.recv() => match msg {
                 None => break,
                 Some((chan, pkt)) => {
@@ -285,13 +275,13 @@ async fn run_capture(a: &CaptureArgs, s: &auth::Session) -> Result<()> {
                     );
                     // Reactive video-start, mirroring the applet's handlers:
                     match pkt.kind {
-                        // xb (132): appliance asks for the video config -> y() sends db/x/o.
-                        0x0084 => {
+                        // xb -> y() sends db/x/o.
+                        apcp::ptype::CONFIG_REQUEST => {
                             info!("xb received -> sending video config (db/x/o)");
                             apcp::send_video_start(&mut wr1, 1024, 768).await.ok();
                         }
-                        // jb (0x8201): resolution reported -> b() sends n().
-                        0x8201 => { apcp::send_resolution_ack(&mut wr1).await.ok(); }
+                        // jb -> b() sends n().
+                        apcp::ptype::RESOLUTION_REPORT => { apcp::send_resolution_ack(&mut wr1).await.ok(); }
                         _ => {}
                     }
                 }
@@ -390,10 +380,7 @@ fn load_replay(path: &std::path::Path) -> Result<kvm::SharedFb> {
 
 fn hex_prefix(b: &[u8], n: usize) -> String {
     let take = b.len().min(n);
-    let mut s = String::with_capacity(take * 2);
-    for byte in &b[..take] {
-        s.push_str(&format!("{byte:02x}"));
-    }
+    let mut s = idrac6_kvm::to_hex(&b[..take]);
     if b.len() > take {
         s.push('…');
     }

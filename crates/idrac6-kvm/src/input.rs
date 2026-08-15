@@ -63,7 +63,7 @@ pub async fn send_input<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, ev: Input, 
                 b |= 0x02; // right
             }
             let body = [0, b, (x >> 8) as u8, x as u8, (y >> 8) as u8, y as u8, 0, 0];
-            apcp::write_packet(s, 513, &body).await?;
+            apcp::write_packet(s, apcp::ptype::POINTER, &body).await?;
         }
     }
     Ok(())
@@ -142,7 +142,7 @@ fn keysym_to_hid(ks: u32) -> Option<(u16, bool)> {
 
 async fn send_key_hid<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, down: bool, hid: u16) -> Result<()> {
     let body = [0, if down { 0 } else { 1 }, (hid >> 8) as u8, hid as u8, 0, 0, 0, 0];
-    apcp::write_packet(s, 512, &body).await
+    apcp::write_packet(s, apcp::ptype::KEYBOARD, &body).await
 }
 
 #[cfg(test)]

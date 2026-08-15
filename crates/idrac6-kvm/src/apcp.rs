@@ -29,22 +29,43 @@ pub enum ConnKind {
 
 /// APCP session-packet type codes, from the applet's dispatch table
 /// (`com/avocent/kvm/b/a/a.java`). Requests are low numbers; the appliance's replies
-/// carry the high bit (e.g. login 256 -> reply 257; video 128.. -> 34304..).
+/// carry the high bit (e.g. login 256 -> reply 257; video 128.. -> 34304..). The trailing
+/// comment on each is the applet's symbol for it.
 pub mod ptype {
+    pub const FRAME_ACK: u16 = 0; // cb
+    pub const LINK: u16 = 1; // ac
     pub const LOGIN: u16 = 256;
+    pub const LOGIN_REPLY: u16 = 257;
     pub const LOGIN_EXT: u16 = 258;
+    pub const KEYBOARD: u16 = 512; // f
+    pub const POINTER: u16 = 513; // gc
+    pub const RESOLUTION_ACK: u16 = 769; // n
+    pub const SET_RESOLUTION: u16 = 770; // x
+    pub const VIDEO_START: u16 = 772; // o
+    pub const VIDEO_CONFIG: u16 = 782; // db
+    pub const KEEPALIVE: u16 = 1024; // p
+    pub const VIDEO_HB: u16 = 0x0081; // hb, video/screen tile
+    pub const CONFIG_REQUEST: u16 = 0x0084; // xb, appliance requests video config
+    pub const RESOLUTION_REPORT: u16 = 0x8201; // jb, appliance reports screen resolution
+    pub const LOGIN_RESPONSE_ALT: u16 = 0x8300; // vb
+    pub const LOGIN_RESPONSE: u16 = 0x8305; // vb
 }
+
+/// Media-channel flow-control window `W`: send a `cb` frame-ack after this many received video
+/// packets (per `r.B()`), or the appliance's send window drains and it goes quiet.
+pub const FLOW_CONTROL_WINDOW: u8 = 20;
 
 /// Human label for a packet type, for capture logging.
 pub fn ptype_name(t: u16) -> &'static str {
+    use self::ptype::*;
     match t {
-        256 | 258 => "LoginRequest",
-        257 | 0x8305 | 0x8300 => "LoginResponse",
-        0 => "FrameRequest(cb)",
-        769 => "ResolutionAck(n)",
-        770 => "SetResolution",
-        772 => "VideoStart(o)",
-        782 => "VideoStart(db)",
+        LOGIN | LOGIN_EXT => "LoginRequest",
+        LOGIN_REPLY | LOGIN_RESPONSE | LOGIN_RESPONSE_ALT => "LoginResponse",
+        FRAME_ACK => "FrameRequest(cb)",
+        RESOLUTION_ACK => "ResolutionAck(n)",
+        SET_RESOLUTION => "SetResolution",
+        VIDEO_START => "VideoStart(o)",
+        VIDEO_CONFIG => "VideoStart(db)",
         128..=138 => "video/screen",
         34304..=34314 => "video/screen(reply)",
         _ => "?",
@@ -55,25 +76,25 @@ pub fn ptype_name(t: u16) -> &'static str {
 /// `com/avocent/kvm/b/r.java`): db(true), the client resolution, and o(). Only then does the
 /// appliance stream frames.
 pub async fn send_video_start<S: AsyncWrite + Unpin>(s: &mut S, width: u16, height: u16) -> Result<()> {
-    write_packet(s, 782, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // db(true)
+    write_packet(s, ptype::VIDEO_CONFIG, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // db(true)
     let mut res = [0u8; 8];
     res[0..2].copy_from_slice(&width.to_be_bytes());
     res[2..4].copy_from_slice(&height.to_be_bytes());
-    write_packet(s, 770, &res).await?; // x(width, height)
-    write_packet(s, 772, &[0u8; 8]).await?; // o()
+    write_packet(s, ptype::SET_RESOLUTION, &res).await?; // x(width, height)
+    write_packet(s, ptype::VIDEO_START, &[0u8; 8]).await?; // o()
     Ok(())
 }
 
 /// `n()` (type 769), sent once the appliance reports the screen resolution (`r.b()`).
 pub async fn send_resolution_ack<S: AsyncWrite + Unpin>(s: &mut S) -> Result<()> {
-    write_packet(s, 769, &[0u8; 8]).await
+    write_packet(s, ptype::RESOLUTION_ACK, &[0u8; 8]).await
 }
 
 /// `cb` flow-control ack (type 0), sent on the MEDIA channel every W=20 received video
 /// packets, per `r.B()`. Byte 0 carries the count of frames since the last ack; without it
 /// the appliance's send window drains and it goes quiet (or a wrong-channel flood stalls it).
 pub async fn send_frame_ack<S: AsyncWrite + Unpin>(s: &mut S, count: u8) -> Result<()> {
-    write_packet(s, 0, &[count, 0, 0, 0, 0, 0, 0, 0]).await
+    write_packet(s, ptype::FRAME_ACK, &[count, 0, 0, 0, 0, 0, 0, 0]).await
 }
 
 /// `ac` (type 1), sent on the second (media) channel to bind it to the authenticated session,
@@ -82,7 +103,7 @@ pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Resu
     let mut body = [0u8; 8];
     body[0..4].copy_from_slice(&c.to_be_bytes());
     body[4..8].copy_from_slice(&d.to_be_bytes());
-    write_packet(s, 1, &body).await
+    write_packet(s, ptype::LINK, &body).await
 }
 
 /// A duplex stream that is either plaintext or TLS-wrapped.

@@ -307,5 +307,5 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 fn random_token() -> String {
     let mut b = [0u8; 32];
     openssl::rand::rand_bytes(&mut b).ok();
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    crate::to_hex(&b)
 }

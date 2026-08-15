@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -86,7 +86,7 @@ async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedF
             tokio::select! {
                 _ = keepalive.tick() => {
                     if let Some(w) = w_io.lock().await.as_mut() {
-                        let _ = apcp::write_packet(w, 1024, &[0u8; 8]).await; // `p` keep-alive
+                        let _ = apcp::write_packet(w, apcp::ptype::KEEPALIVE, &[0u8; 8]).await;
                     }
                 }
                 ev = input_rx.recv() => match ev {
@@ -164,17 +164,7 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
     let c = auth::send_login(&mut ch1, &s.user, &s.password, true).await?;
     let (mut rd1, wr1) = tokio::io::split(ch1);
 
-    loop {
-        let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(&mut rd1))
-            .await
-            .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
-        if pkt.kind == 0x8305 || pkt.kind == 0x8300 {
-            match pkt.body.first() {
-                Some(0) => break,
-                other => bail!("KVM login rejected (status {other:?})"),
-            }
-        }
-    }
+    auth::await_login_ok(&mut rd1).await?;
     info!("login ok; opening media channel");
     // Publish the control-channel writer so the input task can reach it.
     *writer.lock().await = Some(wr1);
@@ -206,23 +196,23 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
     let mut frame: Vec<u8> = Vec::new();
     let mut dims = (0u16, 0u16);
     let mut frames_decoded = 0u64;
-    let mut hb_count = 0u32; // media packets since last flow-control ack (W = 20)
+    let mut hb_count = 0u32; // media packets since last flow-control ack
 
     while let Some((_chan, pkt)) = rx.recv().await {
         match pkt.kind {
-            0x0084 => {
+            apcp::ptype::CONFIG_REQUEST => {
                 if let Some(w) = writer.lock().await.as_mut() {
                     apcp::send_video_start(w, 1024, 768).await.ok();
                 }
             }
-            0x8201 => {
+            apcp::ptype::RESOLUTION_REPORT => {
                 if let Some(w) = writer.lock().await.as_mut() {
                     apcp::send_resolution_ack(w).await.ok();
                 }
             }
-            0x0081 => {
+            apcp::ptype::VIDEO_HB => {
                 hb_count += 1;
-                if hb_count >= 20 {
+                if hb_count >= apcp::FLOW_CONTROL_WINDOW as u32 {
                     apcp::send_frame_ack(&mut wr2, hb_count as u8).await.ok();
                     hb_count = 0;
                 }
