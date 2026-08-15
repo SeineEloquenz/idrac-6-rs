@@ -58,7 +58,6 @@ in
       serviceConfig = {
         ExecStart = lib.escapeShellArgs [
           (lib.getExe cfg.package)
-          "web"
           "--host" cfg.host
           "--user" cfg.user
           "--listen" cfg.listen

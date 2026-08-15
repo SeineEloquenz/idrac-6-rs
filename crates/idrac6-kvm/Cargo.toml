@@ -3,10 +3,16 @@ name = "idrac6-kvm"
 version = "0.1.0"
 edition = "2021"
 description = "Modern KVM console proxy for Dell iDRAC 6 (APCP to RFB/VNC)"
+autobins = false
 
 [[bin]]
-name = "idrac6-kvm"
-path = "src/main.rs"
+name = "idrac6-kvm-serve"
+path = "src/bin/serve.rs"
+
+[[bin]]
+name = "idrac6-kvm-web"
+path = "src/bin/web.rs"
+required-features = ["web"]
 
 [dependencies]
 idrac6-video = { path = "../idrac6-video" }

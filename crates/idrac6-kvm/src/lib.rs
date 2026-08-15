@@ -15,6 +15,16 @@ pub mod web;
 /// The pure video codec + framebuffer, re-exported so `crate::video` paths keep resolving.
 pub use idrac6_video as video;
 
+/// Initialize the tracing subscriber from `RUST_LOG` (default `idrac6_kvm=info,info`).
+pub fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "idrac6_kvm=info,info".into()),
+        )
+        .init();
+}
+
 /// Lowercase hex encoding of a byte slice.
 pub fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;

@@ -18,12 +18,12 @@
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs = [ pkgs.openssl ];
         buildNoDefaultFeatures = !withWeb;
-        cargoBuildFlags = [ "-p" "idrac6-kvm" ];
+        cargoBuildFlags = [ "--bin" pname ];
         cargoTestFlags = [ "-p" "idrac6-kvm" ];
         meta = {
           description = "Modern KVM console proxy for Dell iDRAC 6"
             + (if withWeb then " (self-serve noVNC web app)" else " (RFB/VNC proxy)");
-          mainProgram = "idrac6-kvm";
+          mainProgram = pname;
         };
       };
     in
@@ -44,7 +44,7 @@
             name = "idrac6-kvm-serve";
             tag = "latest";
             config = {
-              Entrypoint = [ (pkgs.lib.getExe serve) "serve" ];
+              Entrypoint = [ (pkgs.lib.getExe serve) ];
               Env = [ "IDRAC_LISTEN=0.0.0.0:5900" ];
               ExposedPorts = { "5900/tcp" = { }; };
             };
@@ -55,7 +55,7 @@
             tag = "latest";
             contents = [ pkgs.novnc ];
             config = {
-              Entrypoint = [ (pkgs.lib.getExe web) "web" ];
+              Entrypoint = [ (pkgs.lib.getExe web) ];
               Env = [
                 "IDRAC_LISTEN=0.0.0.0:8080"
                 "IDRAC_NOVNC_ROOT=${pkgs.novnc}/share/webapps/novnc"
@@ -90,11 +90,6 @@
             # Link the system (nixpkgs) OpenSSL rather than vendoring/building it.
             OPENSSL_NO_VENDOR = "1";
           };
-        };
-
-        # Opt-in shell with the heavy tooling for the M0 capture spike against the R710.
-        capture = pkgs.mkShell {
-          packages = with pkgs; [ tigervnc wireshark-cli ];
         };
       });
 

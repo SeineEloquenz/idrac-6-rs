@@ -162,7 +162,7 @@ async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedF
 /// and decode video into `shared` until the connection drops. Returns `Ok` on a clean drop.
 async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWriter) -> Result<()> {
     info!(host = %s.host, "connecting KVM session");
-    let (mut ch1, _) = apcp::open_channel(&s.host, s.video_port, ConnKind::Primary, false).await?;
+    let (mut ch1, _) = apcp::open_channel(&s.host, s.video_port, ConnKind::Primary).await?;
     let c = auth::send_login(&mut ch1, &s.user, &s.password, true).await?;
     let (mut rd1, wr1) = tokio::io::split(ch1);
 
@@ -171,7 +171,7 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
     // Publish the control-channel writer so the input task can reach it.
     *writer.lock().await = Some(wr1);
 
-    let (mut ch2, _) = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary, false).await?;
+    let (mut ch2, _) = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary).await?;
     apcp::send_link(&mut ch2, c, 0).await?;
     let (mut rd2, mut wr2) = tokio::io::split(ch2);
 

@@ -46,8 +46,8 @@ You can also build the binary with cargo. `--no-default-features` drops the web 
 dependencies for a smaller RFB-only proxy.
 
 ```sh
-cargo build --release                          # both subcommands
-cargo build --release --no-default-features    # RFB/VNC proxy only
+cargo build --release                          # both binaries
+cargo build --release --no-default-features    # idrac6-kvm-serve only (RFB/VNC proxy)
 ```
 
 ## Usage
@@ -55,17 +55,15 @@ cargo build --release --no-default-features    # RFB/VNC proxy only
 ```sh
 # Self-serve web console. Credentials are entered in the browser, nothing is stored.
 NOVNC=$(nix build nixpkgs#novnc --no-link --print-out-paths)/share/webapps/novnc
-idrac6-kvm web --host 192.0.2.10 --listen 127.0.0.1:8080 --novnc-root "$NOVNC"
+idrac6-kvm-web --host 192.0.2.10 --listen 127.0.0.1:8080 --novnc-root "$NOVNC"
 
 # Plain RFB/VNC for native clients. The tool mints the KVM token itself.
-IDRAC_PASSWORD=... idrac6-kvm serve --host 192.0.2.10 --user root --listen 127.0.0.1:5900
+IDRAC_PASSWORD=... idrac6-kvm-serve --host 192.0.2.10 --user root --listen 127.0.0.1:5900
 ```
 
 Both listen on plain, unauthenticated transports, so bind them to localhost behind a TLS reverse
 proxy, reach them over an SSH tunnel, or bind only to a trusted network. `IDRAC_HOST`, `IDRAC_USER`,
-`IDRAC_PASSWORD` and `IDRAC_LISTEN` work in place of the flags. For `serve` you can also pass `--jnlp
-viewer.jnlp` with a token from a downloaded Virtual Console descriptor instead of an account
-password.
+`IDRAC_PASSWORD` and `IDRAC_LISTEN` work in place of the flags.
 
 Set the guest console to a US keymap. VNC keyboards are character-based rather than position-based
 and the tool maps to US HID usages, so a non-US console mis-maps symbols.

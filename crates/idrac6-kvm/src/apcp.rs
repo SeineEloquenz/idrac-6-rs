@@ -101,31 +101,6 @@ impl PacketType {
             other => Self::Other(other),
         }
     }
-
-    /// Human label for capture logging.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Login | Self::LoginExt => "LoginRequest",
-            Self::LoginReply | Self::LoginResponse | Self::LoginResponseAlt => "LoginResponse",
-            Self::FrameAck => "FrameRequest(cb)",
-            Self::Link => "Link(ac)",
-            Self::Keyboard => "Keyboard(f)",
-            Self::Pointer => "Pointer(gc)",
-            Self::ResolutionAck => "ResolutionAck(n)",
-            Self::SetResolution => "SetResolution(x)",
-            Self::VideoStart => "VideoStart(o)",
-            Self::VideoConfig => "VideoConfig(db)",
-            Self::Keepalive => "Keepalive(p)",
-            Self::VideoHb => "video/screen(hb)",
-            Self::ConfigRequest => "ConfigRequest(xb)",
-            Self::ResolutionReport => "ResolutionReport(jb)",
-            Self::Other(c) => match c {
-                128..=138 => "video/screen",
-                34304..=34314 => "video/screen(reply)",
-                _ => "?",
-            },
-        }
-    }
 }
 
 /// Media-channel flow-control window `W`: send a `cb` frame-ack after this many received video
@@ -166,7 +141,7 @@ pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Resu
     write_packet(s, PacketType::Link, &body).await
 }
 
-/// A duplex stream that is either plaintext or TLS-wrapped.
+/// A boxed duplex byte stream for a KVM channel (TLS-wrapped).
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
@@ -224,26 +199,15 @@ async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<HandshakeRepl
 
 /// Perform TCP connect + handshake, honoring a port redirect and upgrading to TLS.
 ///
-/// The iDRAC 6 KVM channel requires TLS: it sends no handshake reply at all to a
-/// plaintext (`enc_pref=1`) request, and its reply flags carry `TLS_REQUIRED`. We
-/// therefore request `enc_pref=4` and TLS-wrap unless `plaintext` is explicitly set (an
-/// escape hatch for other/older appliances). Returns the ready channel plus the reply.
-pub async fn open_channel(
-    host: &str,
-    port: u16,
-    kind: ConnKind,
-    plaintext: bool,
-) -> Result<(Box<dyn Stream>, HandshakeReply)> {
+/// The iDRAC 6 KVM channel requires TLS: it sends no handshake reply to a plaintext request, and
+/// its reply flags carry `TLS_REQUIRED`. We advertise `enc=5` (plaintext- and TLS-capable), the
+/// appliance selects TLS, and we wrap the channel. Returns the ready channel plus the reply.
+pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<(Box<dyn Stream>, HandshakeReply)> {
     let mut tcp = TcpStream::connect((host, port)).await.context("tcp connect")?;
     tcp.set_nodelay(true).ok();
 
     let nonce = random_nonce();
-    // The applet advertises 5 (bits 0|2 = plaintext-capable + TLS-capable); the appliance
-    // then selects TLS. A plaintext-only (1) request gets no reply at all.
-    let enc_pref = if plaintext { 1 } else { 5 };
-    tcp.write_all(&encode_handshake(kind, enc_pref, &nonce))
-        .await
-        .context("write handshake")?;
+    tcp.write_all(&encode_handshake(kind, 5, &nonce)).await.context("write handshake")?;
     let reply = read_handshake(&mut tcp).await?;
 
     // Some firmware redirects the media stream to another port; this one keeps 5900.
@@ -255,12 +219,8 @@ pub async fn open_channel(
         stream.set_nodelay(true).ok();
     }
 
-    if plaintext {
-        Ok((Box::new(stream), reply))
-    } else {
-        let tls = tls::upgrade(stream, host).await?;
-        Ok((Box::new(tls), reply))
-    }
+    let tls = tls::upgrade(stream, host).await?;
+    Ok((Box::new(tls), reply))
 }
 
 /// One APCP session packet: an 8-byte `BEEF` header (magic + u16 type + u16 total-length,

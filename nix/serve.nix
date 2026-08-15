@@ -55,7 +55,7 @@ in
         LoadCredential = [ "password:${cfg.passwordFile}" ];
         ExecStart = pkgs.writeShellScript "idrac6-kvm-serve-start" ''
           export IDRAC_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/password")"
-          exec ${lib.getExe cfg.package} serve \
+          exec ${lib.getExe cfg.package} \
             --host ${lib.escapeShellArg cfg.host} \
             --user ${lib.escapeShellArg cfg.user} \
             --listen ${lib.escapeShellArg cfg.listen}
