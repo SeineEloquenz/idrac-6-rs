@@ -26,7 +26,9 @@ use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
-use crate::{auth, input, kvm, rfb};
+use super::rfb;
+use crate::appliance::auth;
+use crate::session::{input, kvm};
 
 const COOKIE: &str = "idrac6_session";
 // noVNC resolves its `path` relative to the page URL, so the viewer must sit at the web root
@@ -307,5 +309,15 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 fn random_token() -> String {
     let mut b = [0u8; 32];
     openssl::rand::rand_bytes(&mut b).ok();
-    crate::to_hex(&b)
+    to_hex(&b)
+}
+
+/// Lowercase hex encoding of a byte slice.
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }

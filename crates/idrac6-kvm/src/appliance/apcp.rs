@@ -10,15 +10,12 @@ use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::tls;
+use super::tls;
 
 pub const MAGIC: &[u8; 4] = b"APCP";
 pub const HANDSHAKE_LEN: usize = 53;
 pub const VER_MAJOR: u8 = 2;
 pub const VER_MINOR: u8 = 34;
-
-/// Capability bit in the handshake reply's flags field: the appliance requires TLS.
-pub const FLAG_TLS_REQUIRED: u32 = 1 << 2;
 
 /// Connection kind sent in the handshake (`by` in the applet). `a()` -> 3, `b()` -> 4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,21 +142,6 @@ pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Resu
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
-/// Parsed handshake reply from the appliance.
-#[derive(Debug, Clone)]
-pub struct HandshakeReply {
-    pub flags: u32,
-    pub redirect_port: u16,
-    pub ver_major: u8,
-    pub ver_minor: u8,
-}
-
-impl HandshakeReply {
-    pub fn tls_required(&self) -> bool {
-        self.flags & FLAG_TLS_REQUIRED != 0
-    }
-}
-
 /// Encode the 53-byte handshake request. `enc_pref` mirrors the applet's `h` field
 /// (1 = plaintext, 4 = TLS). `payload` is the 32-byte client nonce (padded/truncated).
 pub fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) -> [u8; HANDSHAKE_LEN] {
@@ -179,8 +161,8 @@ pub fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) -> [u8; H
     buf
 }
 
-/// Read and parse the 53-byte handshake reply.
-async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<HandshakeReply> {
+/// Read the 53-byte handshake reply, returning the redirect port (0 = none).
+async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<u16> {
     let mut buf = [0u8; HANDSHAKE_LEN];
     s.read_exact(&mut buf).await.context("read handshake reply")?;
     if &buf[0..4] != MAGIC {
@@ -190,37 +172,33 @@ async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<HandshakeRepl
     if marker != 0x8100 {
         bail!("unexpected handshake marker {marker:#06x}");
     }
-    let ver_major = buf[12];
-    let ver_minor = buf[13];
-    let flags = u32::from_be_bytes([buf[14], buf[15], buf[16], buf[17]]);
-    let redirect_port = u16::from_be_bytes([buf[18], buf[19]]);
-    Ok(HandshakeReply { flags, redirect_port, ver_major, ver_minor })
+    Ok(u16::from_be_bytes([buf[18], buf[19]]))
 }
 
 /// Perform TCP connect + handshake, honoring a port redirect and upgrading to TLS.
 ///
-/// The iDRAC 6 KVM channel requires TLS: it sends no handshake reply to a plaintext request, and
-/// its reply flags carry `TLS_REQUIRED`. We advertise `enc=5` (plaintext- and TLS-capable), the
-/// appliance selects TLS, and we wrap the channel. Returns the ready channel plus the reply.
-pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<(Box<dyn Stream>, HandshakeReply)> {
+/// The iDRAC 6 KVM channel requires TLS: it sends no handshake reply to a plaintext request. We
+/// advertise `enc=5` (plaintext- and TLS-capable), the appliance selects TLS, and we wrap the
+/// channel.
+pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<Box<dyn Stream>> {
     let mut tcp = TcpStream::connect((host, port)).await.context("tcp connect")?;
     tcp.set_nodelay(true).ok();
 
     let nonce = random_nonce();
     tcp.write_all(&encode_handshake(kind, 5, &nonce)).await.context("write handshake")?;
-    let reply = read_handshake(&mut tcp).await?;
+    let redirect_port = read_handshake(&mut tcp).await?;
 
     // Some firmware redirects the media stream to another port; this one keeps 5900.
     let mut stream = tcp;
-    if reply.redirect_port != 0 && reply.redirect_port != port {
-        stream = TcpStream::connect((host, reply.redirect_port))
+    if redirect_port != 0 && redirect_port != port {
+        stream = TcpStream::connect((host, redirect_port))
             .await
             .context("tcp reconnect to redirect port")?;
         stream.set_nodelay(true).ok();
     }
 
     let tls = tls::upgrade(stream, host).await?;
-    Ok((Box::new(tls), reply))
+    Ok(Box::new(tls))
 }
 
 /// One APCP session packet: an 8-byte `BEEF` header (magic + u16 type + u16 total-length,

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tracing::debug;
 
-use crate::apcp;
+use crate::appliance::apcp;
 
 /// Input events from the RFB layer, translated to APCP on the KVM channel.
 #[derive(Debug, Clone, Copy)]
@@ -18,14 +18,14 @@ pub enum Input {
 /// Keyboard modifier state carried across input events, so Shift synthesized for a shifted
 /// character is not doubled when the client already holds Shift itself.
 #[derive(Default)]
-pub struct Mods {
+pub(crate) struct Mods {
     client_shift: bool,
 }
 
 /// Translate an RFB input event to its APCP packet (sent on the control channel).
 /// Keyboard = packet type 512 (`f`): [0, down?0:1, hidHi, hidLo, 0,0,0,0].
 /// Mouse    = packet type 513 (`gc`): [0, buttons, xHi, xLo, yHi, yLo, 0, 0], absolute coords.
-pub async fn send_input<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, ev: Input, mods: &mut Mods) -> Result<()> {
+pub(crate) async fn send_input<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, ev: Input, mods: &mut Mods) -> Result<()> {
     match ev {
         Input::Key { down, keysym } => {
             if keysym == 0xFFE1 || keysym == 0xFFE2 {

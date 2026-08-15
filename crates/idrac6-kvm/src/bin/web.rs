@@ -1,5 +1,5 @@
 //! `idrac6-kvm-web`: the self-serve browser console. Login is entered in the browser and no
-//! secret is stored on the server; see [`idrac6_kvm::web`].
+//! secret is stored on the server; see [`idrac6_kvm::server::web`].
 
 use anyhow::Result;
 use clap::Parser;
@@ -28,5 +28,5 @@ struct Cli {
 async fn main() -> Result<()> {
     idrac6_kvm::init_tracing();
     let cli = Cli::parse();
-    idrac6_kvm::web::run(cli.host, cli.user, cli.listen, cli.novnc_root, cli.idle_timeout).await
+    idrac6_kvm::server::web::run(cli.host, cli.user, cli.listen, cli.novnc_root, cli.idle_timeout).await
 }

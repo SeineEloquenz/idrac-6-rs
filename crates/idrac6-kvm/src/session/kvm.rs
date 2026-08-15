@@ -11,23 +11,23 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::apcp::{self, ConnKind};
-use crate::auth;
-use crate::input::{send_input, Input, Mods};
+use crate::appliance::apcp::{self, ConnKind};
+use crate::appliance::auth;
+use super::input::{send_input, Input, Mods};
 use crate::video::hb::HbReassembler;
 use crate::video::{decoder::Decoder, Framebuffer};
 
 /// Shared framebuffer with a generation counter bumped on every decoded frame and the union of
 /// changed pixel ranges (half-open linear indices) since a client last consumed them.
 pub struct FbState {
-    pub fb: Framebuffer,
-    pub generation: u64,
+    pub(crate) fb: Framebuffer,
+    pub(crate) generation: u64,
     dirty: Option<Range<usize>>,
 }
 
 impl FbState {
     /// Union a decoded frame's changed span into the pending damage.
-    pub fn mark_dirty(&mut self, range: Range<usize>) {
+    pub(crate) fn mark_dirty(&mut self, range: Range<usize>) {
         self.dirty = Some(match self.dirty.take() {
             Some(cur) => cur.start.min(range.start)..cur.end.max(range.end),
             None => range,
@@ -35,14 +35,14 @@ impl FbState {
     }
 
     /// Take and clear the pending damage span.
-    pub fn take_dirty(&mut self) -> Option<Range<usize>> {
+    pub(crate) fn take_dirty(&mut self) -> Option<Range<usize>> {
         self.dirty.take()
     }
 }
 
 pub type SharedFb = Arc<Mutex<FbState>>;
 
-pub fn shared(width: u32, height: u32) -> SharedFb {
+pub(crate) fn shared(width: u32, height: u32) -> SharedFb {
     Arc::new(Mutex::new(FbState { fb: Framebuffer::new(width, height), generation: 0, dirty: None }))
 }
 
@@ -162,7 +162,7 @@ async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedF
 /// and decode video into `shared` until the connection drops. Returns `Ok` on a clean drop.
 async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWriter) -> Result<()> {
     info!(host = %s.host, "connecting KVM session");
-    let (mut ch1, _) = apcp::open_channel(&s.host, s.video_port, ConnKind::Primary).await?;
+    let mut ch1 = apcp::open_channel(&s.host, s.video_port, ConnKind::Primary).await?;
     let c = auth::send_login(&mut ch1, &s.user, &s.password, true).await?;
     let (mut rd1, wr1) = tokio::io::split(ch1);
 
@@ -171,7 +171,7 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
     // Publish the control-channel writer so the input task can reach it.
     *writer.lock().await = Some(wr1);
 
-    let (mut ch2, _) = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary).await?;
+    let mut ch2 = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary).await?;
     apcp::send_link(&mut ch2, c, 0).await?;
     let (mut rd2, mut wr2) = tokio::io::split(ch2);
 
@@ -266,7 +266,7 @@ pub fn spawn(refresh: Refresh, initial: auth::Session) -> (SharedFb, mpsc::Sende
 #[cfg(test)]
 mod tests {
     use super::{shared, supervise, Refresh};
-    use crate::auth;
+    use crate::appliance::auth;
     use std::time::Duration;
     use tokio::sync::mpsc;
 

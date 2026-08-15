@@ -15,7 +15,7 @@ use hyper::header::{CONNECTION, HOST};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
-use crate::tls;
+use super::tls;
 
 pub struct Response {
     pub status: u16,

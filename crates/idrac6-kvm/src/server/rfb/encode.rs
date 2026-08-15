@@ -5,7 +5,7 @@ use anyhow::Result;
 use flate2::{Compress, Compression, FlushCompress};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::kvm::SharedFb;
+use crate::session::kvm::SharedFb;
 
 const ENC_RAW: i32 = 0;
 const ENC_ZLIB: i32 = 6;

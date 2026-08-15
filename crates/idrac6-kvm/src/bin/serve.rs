@@ -6,7 +6,7 @@ use clap::{Args, Parser};
 use tokio::net::TcpListener;
 use tracing::info;
 
-use idrac6_kvm::{auth, kvm, rfb};
+use idrac6_kvm::{appliance::auth, server::rfb, session::kvm};
 
 #[derive(Parser)]
 #[command(name = "idrac6-kvm-serve", about = "iDRAC 6 KVM console as an RFB/VNC proxy")]
