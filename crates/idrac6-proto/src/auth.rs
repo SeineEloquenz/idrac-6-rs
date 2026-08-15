@@ -1,10 +1,6 @@
-//! iDRAC 6 KVM authentication.
-//!
-//! KVM does not accept the account password directly. It needs a rotating one-time token the
-//! iDRAC mints per Virtual Console launch, which [`login_and_get_token`] reproduces (web login,
-//! then fetch a fresh `viewer.jnlp`). A pre-downloaded jnlp can be parsed instead. The token
-//! goes to the appliance in an APCP Login Request (type 256, or 258 extended for protocol >= 2),
-//! from `com/avocent/kvm/b/a/ab.java`.
+//! iDRAC 6 KVM authentication. KVM does not accept the account password, only a rotating one-time
+//! token the iDRAC mints per Virtual Console launch, which [`login_and_get_token`] reproduces
+//! (web login, then fetch a fresh `viewer.jnlp`).
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,7 +29,9 @@ pub struct Session {
 pub fn parse_jnlp(xml: &str) -> Result<Session> {
     let mut args: HashMap<&str, &str> = HashMap::new();
     for chunk in xml.split("<argument>").skip(1) {
-        let Some(end) = chunk.find("</argument>") else { continue };
+        let Some(end) = chunk.find("</argument>") else {
+            continue;
+        };
         let kv = &chunk[..end];
         if let Some(eq) = kv.find('=') {
             args.insert(kv[..eq].trim(), kv[eq + 1..].trim());
@@ -72,10 +70,12 @@ pub enum AuthError {
     Other(#[from] anyhow::Error),
 }
 
-/// Log into the iDRAC web UI (`POST /data/login`) and return the session cookies plus the
-/// `ST1` token from the forward URL. This is what "Launch Virtual Console" does before the
-/// appliance will mint a KVM token.
-pub(crate) async fn web_login(host: &str, user: &str, password: &str) -> Result<(Vec<(String, String)>, Option<String>), AuthError> {
+/// Log into the iDRAC web UI, returning the session cookies and the `ST1` token from the forward URL.
+pub(crate) async fn web_login(
+    host: &str,
+    user: &str,
+    password: &str,
+) -> Result<(Vec<(String, String)>, Option<String>), AuthError> {
     let body = format!("user={user}&password={password}");
     let resp = http::request(
         host,
@@ -109,10 +109,18 @@ pub(crate) async fn web_login(host: &str, user: &str, password: &str) -> Result<
 /// args `@`-joined inside literal parens, `/viewer.jnlp(<host>@0@<title>@<epoch_ms>@ST1=<token>)`,
 /// with the title form-encoded and the ST1 token authorizing the request (the cookie alone yields
 /// 401).
-pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st1: Option<&str>) -> Result<String> {
+pub async fn fetch_jnlp(
+    host: &str,
+    user: &str,
+    cookies: &[(String, String)],
+    st1: Option<&str>,
+) -> Result<String> {
     let st1 = st1.context("no ST1 token from login; cannot authorize viewer.jnlp")?;
     let cookie_hdr = cookie_header(cookies);
-    let epoch_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let raw_title = format!("[{host}], Virtual Console, User:{user}");
     let title: String = form_urlencoded::byte_serialize(raw_title.as_bytes()).collect();
     let path = format!("/viewer.jnlp({host}@0@{title}@{epoch_ms}@ST1={st1})");
@@ -123,14 +131,22 @@ pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st
         .context("GET viewer.jnlp")?;
     let body = r.body_str();
     if !(body.contains("passwd=") || body.contains("<jnlp")) {
-        bail!("viewer.jnlp fetch returned HTTP {} but no jnlp body ({} bytes)", r.status, r.body.len());
+        bail!(
+            "viewer.jnlp fetch returned HTTP {} but no jnlp body ({} bytes)",
+            r.status,
+            r.body.len()
+        );
     }
     Ok(body.into_owned())
 }
 
 /// Web login with the account credentials, then mint and parse the jnlp token. The returned
 /// session carries the web cookies and ST1 so the caller can [`web_logout`].
-pub async fn login_and_get_token(host: &str, user: &str, password: &str) -> Result<Session, AuthError> {
+pub async fn login_and_get_token(
+    host: &str,
+    user: &str,
+    password: &str,
+) -> Result<Session, AuthError> {
     let (cookies, st1) = web_login(host, user, password).await?;
     info!(cookies = cookies.len(), st1 = st1.is_some(), "web login ok");
     let jnlp = fetch_jnlp(host, user, &cookies, st1.as_deref()).await?;
@@ -154,9 +170,8 @@ pub async fn web_logout(host: &str, cookies: &[(String, String)], st1: Option<&s
     Ok(())
 }
 
-/// Login body layout (extended, type 258), per `ab.b()`:
-/// userLen(1) + user(96) + passLen(1) + pass(96) + session(8, zero) + o(1) + p(1) + r(4 BE)
-/// followed by q(1) when extended.
+/// Login body layout for the extended (type 258) request. userLen(1) + user(96) + passLen(1) +
+/// pass(96) + session(8, zero) + o(1) + p(1) + r(4 BE), then q(1) when extended.
 fn build_login_body(user: &str, password: &str, o: u8, p: u8, r: u32, q: Option<u8>) -> Vec<u8> {
     let mut b = Vec::with_capacity(209);
     push_len_field(&mut b, user.as_bytes(), 96);
@@ -179,9 +194,8 @@ fn push_len_field(out: &mut Vec<u8>, src: &[u8], width: usize) {
     out.extend(std::iter::repeat_n(0u8, width - n));
 }
 
-/// Send the Login Request and return the random session id `C` it carried. `C` links the
-/// second (media) channel via the `ac` packet, so the caller must keep it. `extended`
-/// (protocol >= 2) adds the trailing `q` byte and uses packet type 258.
+/// Send the Login Request, returning the random session id it carried. The caller must keep it to
+/// link the media channel. `extended` (protocol >= 2) adds a trailing byte and uses packet type 258.
 pub async fn send_login<S: AsyncWrite + Unpin>(
     s: &mut S,
     user: &str,
@@ -190,19 +204,26 @@ pub async fn send_login<S: AsyncWrite + Unpin>(
 ) -> Result<u32> {
     let r: u32 = (openssl_rand_u32() % 10_000_000).max(1);
     let body = build_login_body(user, password, 0, 0, r, extended.then_some(0));
-    let kind = if extended { apcp::PacketType::LoginExt } else { apcp::PacketType::Login };
+    let kind = if extended {
+        apcp::PacketType::LoginExt
+    } else {
+        apcp::PacketType::Login
+    };
     apcp::write_packet(s, kind, &body).await?;
     Ok(r)
 }
 
-/// Read the control channel until the appliance's User Login Response arrives, returning once it
-/// reports success. Times out after 10s; a non-zero status byte is a rejection.
+/// Read the control channel until the appliance's login response arrives. Times out after 10s. A
+/// non-zero status byte is a rejection.
 pub async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
     loop {
         let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(rd))
             .await
             .map_err(|_| anyhow::anyhow!("timeout waiting for login response"))??;
-        if matches!(pkt.kind, apcp::PacketType::LoginResponse | apcp::PacketType::LoginResponseAlt) {
+        if matches!(
+            pkt.kind,
+            apcp::PacketType::LoginResponse | apcp::PacketType::LoginResponseAlt
+        ) {
             return match pkt.body.first() {
                 Some(0) => Ok(()),
                 other => bail!("login rejected (status {other:?})"),
@@ -213,7 +234,11 @@ pub async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
 
 /// Join cookie name=value pairs into a `Cookie` request header value.
 fn cookie_header(cookies: &[(String, String)]) -> String {
-    cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
+    cookies
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn openssl_rand_u32() -> u32 {
@@ -245,7 +270,10 @@ mod tests {
     fn jnlp_title_encoding_matches_idrac_format() {
         let raw = "[idrac-0.i.eloque.nz], Virtual Console, User:root";
         let enc: String = form_urlencoded::byte_serialize(raw.as_bytes()).collect();
-        assert_eq!(enc, "%5Bidrac-0.i.eloque.nz%5D%2C+Virtual+Console%2C+User%3Aroot");
+        assert_eq!(
+            enc,
+            "%5Bidrac-0.i.eloque.nz%5D%2C+Virtual+Console%2C+User%3Aroot"
+        );
     }
 
     #[test]

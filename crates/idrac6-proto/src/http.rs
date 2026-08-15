@@ -1,9 +1,6 @@
-//! Tiny HTTPS/1.1 client over the legacy-TLS layer (iDRAC 6 web UI).
-//!
-//! iDRAC 6 serves TLS 1.2 but with a 1024-bit RSA cert and 1024-bit DH parameters that OpenSSL
-//! 3's default SECLEVEL 1 rejects (`dh key too small`); `reqwest`/`native-tls` don't expose the
-//! security level, so they can't connect. We drive `hyper` over our own SECLEVEL-0 `tls::upgrade`
-//! stream instead, one request per connection.
+//! Tiny HTTP/1.1 client over the legacy-TLS layer. `reqwest`/`native-tls` can't reach iDRAC 6
+//! (they don't expose OpenSSL's security level, which must drop to 0 for its 1024-bit cert), so
+//! this drives `hyper` over [`tls::upgrade`], one request per connection.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -50,20 +47,29 @@ pub async fn request(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> Result<Response> {
-    let tcp = TcpStream::connect((host, port)).await.context("tcp connect")?;
+    let tcp = TcpStream::connect((host, port))
+        .await
+        .context("tcp connect")?;
     let tls = tls::upgrade(tcp, host).await?;
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(TokioIo::new(tls)).await.context("http1 handshake")?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        .await
+        .context("http1 handshake")?;
     tokio::spawn(async move {
         let _ = conn.await;
     });
 
-    let mut builder = hyper::Request::builder().method(method).uri(path).header(HOST, host).header(CONNECTION, "close");
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header(HOST, host)
+        .header(CONNECTION, "close");
     for (k, v) in headers {
         builder = builder.header(*k, *v);
     }
     let req = builder
-        .body(Full::new(body.map(Bytes::copy_from_slice).unwrap_or_default()))
+        .body(Full::new(
+            body.map(Bytes::copy_from_slice).unwrap_or_default(),
+        ))
         .context("build request")?;
 
     let exchange = async {
@@ -72,9 +78,20 @@ pub async fn request(
         let headers = resp
             .headers()
             .iter()
-            .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
             .collect();
-        let body = resp.into_body().collect().await.context("read body")?.to_bytes().to_vec();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .context("read body")?
+            .to_bytes()
+            .to_vec();
         Ok::<_, anyhow::Error>((status, headers, body))
     };
     let (status, headers, body) = tokio::time::timeout(Duration::from_secs(12), exchange)
@@ -84,5 +101,9 @@ pub async fn request(
     if !(200..400).contains(&status) {
         bail!("HTTP {status} for {method} {path}");
     }
-    Ok(Response { status, headers, body })
+    Ok(Response {
+        status,
+        headers,
+        body,
+    })
 }

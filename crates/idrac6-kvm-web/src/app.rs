@@ -74,7 +74,13 @@ impl AppState {
     }
 }
 
-pub(crate) async fn run(host: String, user: String, listen: String, novnc_root: PathBuf, idle_secs: u64) -> Result<()> {
+pub(crate) async fn run(
+    host: String,
+    user: String,
+    listen: String,
+    novnc_root: PathBuf,
+    idle_secs: u64,
+) -> Result<()> {
     if !novnc_root.join("vnc.html").is_file() {
         warn!(root = %novnc_root.display(), "noVNC vnc.html not found under --novnc-root; the viewer will 404");
     }
@@ -94,9 +100,13 @@ pub(crate) async fn run(host: String, user: String, listen: String, novnc_root: 
         .fallback_service(ServeDir::new(&novnc_root))
         .with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("bind {listen}"))?;
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("bind {listen}"))?;
     info!(%listen, host = %state.host, "web UI listening (plain HTTP — front with a TLS reverse proxy)");
-    axum::serve(listener, app).with_graceful_shutdown(idrac6_kvm::shutdown_signal()).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(idrac6_kvm::shutdown_signal())
+        .await?;
 
     if let Some(b) = state.backend.lock().await.take() {
         info!("shutting down; releasing KVM session");
@@ -122,7 +132,11 @@ struct LoginForm {
 }
 
 async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
-    let user = if form.user.is_empty() { st.default_user.clone() } else { form.user };
+    let user = if form.user.is_empty() {
+        st.default_user.clone()
+    } else {
+        form.user
+    };
     let password = form.password;
 
     let session = match auth::login_and_get_token(&st.host, &user, &password).await {
@@ -135,13 +149,20 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
                 auth::AuthError::Other(_) => StatusCode::BAD_GATEWAY,
             };
             warn!("web login rejected ({status}): {e:#}");
-            return (status, Html(login_page(&st.host, &st.default_user, Some(&e.to_string())))).into_response();
+            return (
+                status,
+                Html(login_page(&st.host, &st.default_user, Some(&e.to_string()))),
+            )
+                .into_response();
         }
     };
 
     let token = random_token();
-    let (host, cookies, st1) = (session.host.clone(), session.web_cookies.clone(), session.web_st1.clone());
-    // Reconnect by re-minting a KVM token from this same web session (no re-login needed).
+    let (host, cookies, st1) = (
+        session.host.clone(),
+        session.web_cookies.clone(),
+        session.web_st1.clone(),
+    );
     let refresh = kvm::refresh_from_web(host.clone(), user.clone(), cookies.clone(), st1.clone());
     let (shared, input, task) = kvm::spawn(refresh, session);
     let backend = Arc::new(Backend {
@@ -156,8 +177,8 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
         last_active: Mutex::new(Instant::now()),
     });
 
-    // A new login takes over the single console, releasing the previous session (the appliance
-    // gives keyboard and mouse to only one session).
+    // The appliance gives keyboard and mouse to one session only, so a new login takes over and
+    // releases the previous one.
     if let Some(old) = st.backend.lock().await.replace(backend) {
         tokio::spawn(async move { old.teardown().await });
     }
@@ -169,7 +190,13 @@ async fn login(State(st): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> 
 
 async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(b) = st.authed(&headers).await {
-        if st.backend.lock().await.as_ref().is_some_and(|c| c.token == b.token) {
+        if st
+            .backend
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|c| c.token == b.token)
+        {
             if let Some(cur) = st.backend.lock().await.take() {
                 tokio::spawn(async move { cur.teardown().await });
             }
@@ -179,7 +206,11 @@ async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
     ([(header::SET_COOKIE, clear)], Redirect::to("/")).into_response()
 }
 
-async fn websockify(ws: WebSocketUpgrade, State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn websockify(
+    ws: WebSocketUpgrade,
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
     match st.authed(&headers).await {
         Some(backend) => {
             info!("websocket upgrade for authenticated viewer");
@@ -239,7 +270,9 @@ async fn reaper(st: Arc<AppState>) {
         let idle = {
             let guard = st.backend.lock().await;
             match guard.as_ref() {
-                Some(b) if b.viewers.load(Ordering::SeqCst) == 0 => b.last_active.lock().await.elapsed() > st.idle_timeout,
+                Some(b) if b.viewers.load(Ordering::SeqCst) == 0 => {
+                    b.last_active.lock().await.elapsed() > st.idle_timeout
+                }
                 _ => false,
             }
         };
@@ -253,7 +286,9 @@ async fn reaper(st: Arc<AppState>) {
 }
 
 fn login_page(host: &str, default_user: &str, error: Option<&str>) -> String {
-    let err = error.map(|e| format!("<p class=\"err\">{}</p>", html_escape(e))).unwrap_or_default();
+    let err = error
+        .map(|e| format!("<p class=\"err\">{}</p>", html_escape(e)))
+        .unwrap_or_default();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -289,7 +324,10 @@ button[disabled] {{ opacity: .8; cursor: progress; }}
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {

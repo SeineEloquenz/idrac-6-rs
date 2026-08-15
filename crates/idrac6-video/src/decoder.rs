@@ -2,12 +2,12 @@
 //! and `com/avocent/kvm/d/c.java` (RGB555 literals). It is byte-oriented over a linear
 //! framebuffer cursor, not the block-JPEG path (the separate `gb` codec).
 //!
-//! Each op is the top 3 bits of a byte; the low 5 bits start a run length that extends
-//! across following bytes sharing the same op (`run`). Ops:
+//! Each op is the top 3 bits of a byte. The low 5 bits start a run length that extends across
+//! following bytes sharing the same op (`run`). The ops are:
 //!   000 skip (leave prev-frame pixels)      010 copy `run` pixels from one row above
 //!   001 repeat the left pixel `run` times    011 two-colour pattern
 //!   1xx literal pixel (RGB555, 2 bytes)
-//! The framebuffer persists across frames; the cursor resets to 0 each frame and `skip`
+//! The framebuffer persists across frames. The cursor resets to 0 each frame, and `skip`
 //! advances it to the changed region.
 
 use super::Framebuffer;
@@ -29,13 +29,20 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(width: u32, _height: u32) -> Self {
-        Self { width: width as usize, cursor: 0 }
+        Self {
+            width: width as usize,
+            cursor: 0,
+        }
     }
 
     /// Decode one frame payload into `fb` (persistent across frames). Returns the op count and
     /// the changed pixel span as a half-open linear index range (`None` if nothing was written).
     /// `skip` advances the cursor without writing, so the span bounds the actual damage.
-    pub fn decode_frame(&mut self, p: &[u8], fb: &mut Framebuffer) -> (usize, Option<Range<usize>>) {
+    pub fn decode_frame(
+        &mut self,
+        p: &[u8],
+        fb: &mut Framebuffer,
+    ) -> (usize, Option<Range<usize>>) {
         self.cursor = 0;
         let len = fb.pixels.len();
         let mut o = 0usize;
@@ -69,7 +76,11 @@ impl Decoder {
                 0x20 => {
                     // repeat the pixel to the left
                     let n = run(p, &mut o, by);
-                    let color = if self.cursor > 0 { fb.pixels[self.cursor - 1] } else { 0xFF00_0000 };
+                    let color = if self.cursor > 0 {
+                        fb.pixels[self.cursor - 1]
+                    } else {
+                        0xFF00_0000
+                    };
                     let end = (self.cursor + n).min(len);
                     fb.pixels[self.cursor..end].fill(color);
                     self.cursor = end;
@@ -116,7 +127,11 @@ impl Decoder {
     /// left pixel, `b` the most recent different pixel.
     fn pattern(&mut self, p: &[u8], o: &mut usize, first: u8, fb: &mut Framebuffer) {
         let len = fb.pixels.len();
-        let a = if self.cursor > 0 { fb.pixels[self.cursor - 1] } else { 0xFF00_0000 };
+        let a = if self.cursor > 0 {
+            fb.pixels[self.cursor - 1]
+        } else {
+            0xFF00_0000
+        };
         let mut b = a;
         let start = self.cursor.min(len).saturating_sub(1);
         for i in (0..=start).rev() {

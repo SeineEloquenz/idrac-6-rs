@@ -15,7 +15,7 @@ pub struct Resolution {
     pub height: u16,
 }
 
-/// One parsed `hb` fragment: its frame resolution, first/last flags, and payload slice.
+/// One parsed `hb` fragment with its frame resolution, first/last flags, and payload slice.
 struct Fragment<'a> {
     resolution: Resolution,
     first: bool,
@@ -74,20 +74,38 @@ mod tests {
     fn single_fragment_frame_carries_resolution() {
         let mut r = HbReassembler::default();
         // height=0x0300 (768), width=0x0400 (1024), flags=first|last, payload [0xAA, 0xBB].
-        let body = [0xde, 0xad, 0xbe, 0xef, 0x03, 0x00, 0x04, 0x00, 0x03, 0, 0, 0, 0xAA, 0xBB];
-        let (res, payload) = r.push(&body).expect("first|last fragment completes a frame");
-        assert_eq!(res, Resolution { width: 1024, height: 768 });
+        let body = [
+            0xde, 0xad, 0xbe, 0xef, 0x03, 0x00, 0x04, 0x00, 0x03, 0, 0, 0, 0xAA, 0xBB,
+        ];
+        let (res, payload) = r
+            .push(&body)
+            .expect("first|last fragment completes a frame");
+        assert_eq!(
+            res,
+            Resolution {
+                width: 1024,
+                height: 768
+            }
+        );
         assert_eq!(payload, &[0xAA, 0xBB]);
     }
 
     #[test]
     fn fragments_reassemble_in_order() {
         let mut r = HbReassembler::default();
-        let first = [0xde, 0xad, 0xbe, 0xef, 0, 4, 0, 8, FLAG_FIRST, 0, 0, 0, 1, 2];
+        let first = [
+            0xde, 0xad, 0xbe, 0xef, 0, 4, 0, 8, FLAG_FIRST, 0, 0, 0, 1, 2,
+        ];
         assert!(r.push(&first).is_none());
         let last = [0xde, 0xad, 0xbe, 0xef, 0, 4, 0, 8, FLAG_LAST, 0, 0, 0, 3, 4];
         let (res, payload) = r.push(&last).expect("last fragment completes the frame");
-        assert_eq!(res, Resolution { width: 8, height: 4 });
+        assert_eq!(
+            res,
+            Resolution {
+                width: 8,
+                height: 4
+            }
+        );
         assert_eq!(payload, &[1, 2, 3, 4]);
     }
 

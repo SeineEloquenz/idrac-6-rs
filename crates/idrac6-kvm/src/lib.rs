@@ -1,4 +1,4 @@
-//! iDRAC 6 KVM proxy library: talk to the appliance's APCP/legacy-TLS console and re-expose it
+//! iDRAC 6 KVM proxy library. Talk to the appliance's APCP/legacy-TLS console and re-expose it
 //! as RFB/VNC (native clients) or a self-serve noVNC web app. The `idrac6-kvm-serve` and
 //! `idrac6-kvm-web` binaries are thin CLIs over these modules.
 

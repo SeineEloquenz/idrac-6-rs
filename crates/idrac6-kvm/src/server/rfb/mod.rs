@@ -1,7 +1,7 @@
-//! Minimal RFB 3.8 (VNC) server exposing the shared framebuffer. Security = None; Raw and Zlib
-//! encodings (wire encoding lives in [`encode`]). Serves any duplex stream: a TCP socket for native
-//! VNC clients, or an RFB-over-WebSocket pipe for the browser (noVNC). Input events are forwarded to
-//! the KVM session.
+//! Minimal RFB 3.8 (VNC) server exposing the shared framebuffer. Security = None. Raw and Zlib
+//! encodings (wire encoding lives in [`encode`]). Serves any duplex stream, a TCP socket for
+//! native VNC clients or an RFB-over-WebSocket pipe for the browser (noVNC). Input events are
+//! forwarded to the KVM session.
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -15,7 +15,11 @@ use crate::session::kvm::SharedFb;
 mod encode;
 use encode::{new_zlib, send_update, PixelFormat, ZlibStream};
 
-pub async fn serve(listener: TcpListener, shared: SharedFb, input: mpsc::Sender<Input>) -> Result<()> {
+pub async fn serve(
+    listener: TcpListener,
+    shared: SharedFb,
+    input: mpsc::Sender<Input>,
+) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await.context("accept")?;
         info!(%peer, "RFB client connected");
@@ -60,7 +64,12 @@ pub async fn serve_conn<S: AsyncRead + AsyncWrite + Unpin>(
     let result = client_loop(&mut sock, &shared, &input, &mut held, (w, h)).await;
     // Release any keys still held when the client vanished, so they don't stick on the guest.
     for keysym in held.drain() {
-        let _ = input.send(Input::Key { down: false, keysym }).await;
+        let _ = input
+            .send(Input::Key {
+                down: false,
+                keysym,
+            })
+            .await;
     }
     result
 }
@@ -109,7 +118,16 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
             3 => {
                 let mut b = [0u8; 9]; // FramebufferUpdateRequest
                 sock.read_exact(&mut b).await?;
-                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize, &pixfmt, zlib.as_mut()).await?;
+                send_update(
+                    sock,
+                    shared,
+                    &mut last_gen,
+                    &mut last_dims,
+                    desktopsize,
+                    &pixfmt,
+                    zlib.as_mut(),
+                )
+                .await?;
             }
             4 => {
                 let mut b = [0u8; 7]; // KeyEvent: down(1)+pad(2)+keysym(4)
@@ -162,12 +180,21 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
 /// Paced so the guest registers each key instead of coalescing a burst into dropped characters.
 async fn paste_text(text: &[u8], input: &mpsc::Sender<Input>) {
     for &c in text {
-        let Some(keysym) = paste_keysym(c) else { continue };
+        let Some(keysym) = paste_keysym(c) else {
+            continue;
+        };
         if input.send(Input::Key { down: true, keysym }).await.is_err() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-        if input.send(Input::Key { down: false, keysym }).await.is_err() {
+        if input
+            .send(Input::Key {
+                down: false,
+                keysym,
+            })
+            .await
+            .is_err()
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(8)).await;
@@ -231,7 +258,10 @@ mod tests {
     async fn rect(c: &mut DuplexStream) -> (u16, u16, i32) {
         let mut r = [0u8; 12];
         c.read_exact(&mut r).await.unwrap();
-        let (w, h) = (u16::from_be_bytes([r[4], r[5]]), u16::from_be_bytes([r[6], r[7]]));
+        let (w, h) = (
+            u16::from_be_bytes([r[4], r[5]]),
+            u16::from_be_bytes([r[6], r[7]]),
+        );
         let enc = i32::from_be_bytes([r[8], r[9], r[10], r[11]]);
         if enc == 0 {
             let mut px = vec![0u8; w as usize * h as usize * 4];
@@ -280,9 +310,21 @@ mod tests {
 
         // The next update announces the resize and repaints at the new size.
         c.write_all(&[3, 0, 0, 0, 0, 0, 0, 4, 0, 2]).await.unwrap();
-        assert_eq!(fbu_rects(&mut c).await, 2, "resize update carries DesktopSize + frame");
-        assert_eq!(rect(&mut c).await, (6, 3, -223), "first rect is DesktopSize at the new size");
-        assert_eq!(rect(&mut c).await, (6, 3, 0), "second rect is the full frame at the new size");
+        assert_eq!(
+            fbu_rects(&mut c).await,
+            2,
+            "resize update carries DesktopSize + frame"
+        );
+        assert_eq!(
+            rect(&mut c).await,
+            (6, 3, -223),
+            "first rect is DesktopSize at the new size"
+        );
+        assert_eq!(
+            rect(&mut c).await,
+            (6, 3, 0),
+            "second rect is the full frame at the new size"
+        );
 
         srv.abort();
     }
@@ -312,7 +354,13 @@ mod tests {
 
         // Press 'a' (keysym 0x61) with no release, then disconnect.
         c.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).await.unwrap(); // KeyEvent down
-        assert!(matches!(rx.recv().await.unwrap(), crate::session::input::Input::Key { down: true, keysym: 0x61 }));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            crate::session::input::Input::Key {
+                down: true,
+                keysym: 0x61
+            }
+        ));
         drop(c); // client vanishes without sending the key-up
 
         let released = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -320,7 +368,13 @@ mod tests {
             .expect("timed out")
             .expect("channel closed");
         assert!(
-            matches!(released, crate::session::input::Input::Key { down: false, keysym: 0x61 }),
+            matches!(
+                released,
+                crate::session::input::Input::Key {
+                    down: false,
+                    keysym: 0x61
+                }
+            ),
             "a key held at disconnect must be auto-released"
         );
 

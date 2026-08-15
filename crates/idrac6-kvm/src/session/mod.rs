@@ -1,5 +1,5 @@
-//! The live KVM session: the reconnect supervisor that decodes video into a shared framebuffer,
-//! plus translation of client input events into APCP.
+//! The live KVM session. A reconnect supervisor decodes video into a shared framebuffer, and
+//! client input events are translated into APCP.
 
 pub mod input;
 pub mod kvm;

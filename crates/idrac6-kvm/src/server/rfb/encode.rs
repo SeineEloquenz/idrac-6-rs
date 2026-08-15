@@ -1,4 +1,4 @@
-//! Framebuffer-update wire encoding for the RFB server: pixel-format conversion and Raw/Zlib
+//! Framebuffer-update wire encoding for the RFB server. Pixel-format conversion and Raw/Zlib
 //! rectangle serialization. The protocol dispatch lives in the parent `rfb` module.
 
 use anyhow::Result;
@@ -35,7 +35,17 @@ pub(super) struct PixelFormat {
 
 impl Default for PixelFormat {
     fn default() -> Self {
-        PixelFormat { bpp: 32, big_endian: false, true_colour: true, r_max: 255, g_max: 255, b_max: 255, r_shift: 16, g_shift: 8, b_shift: 0 }
+        PixelFormat {
+            bpp: 32,
+            big_endian: false,
+            true_colour: true,
+            r_max: 255,
+            g_max: 255,
+            b_max: 255,
+            r_shift: 16,
+            g_shift: 8,
+            b_shift: 0,
+        }
     }
 }
 
@@ -55,7 +65,7 @@ impl PixelFormat {
         }
     }
 
-    /// Whether we can encode to this client format (true-colour 8/16/32bpp); others keep the default.
+    /// Whether we can encode to this client format (true-colour 8/16/32bpp). Others keep the default.
     pub(super) fn acceptable(&self) -> bool {
         self.true_colour && matches!(self.bpp, 8 | 16 | 32)
     }
@@ -79,12 +89,22 @@ impl PixelFormat {
     }
 }
 
-/// A framebuffer update: nothing changed, a resolution change (DesktopSize + full frame), or one
-/// changed rectangle.
+/// A framebuffer update, either nothing changed, a resolution change (DesktopSize + full frame),
+/// or one changed rectangle.
 enum Update {
     Empty,
-    Resize { w: u16, h: u16, pixels: Vec<u32> },
-    Rect { x: u16, y: u16, w: u16, h: u16, pixels: Vec<u32> },
+    Resize {
+        w: u16,
+        h: u16,
+        pixels: Vec<u32>,
+    },
+    Rect {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        pixels: Vec<u32>,
+    },
 }
 
 /// Append a rectangle header (x, y, w, h, encoding), all big-endian.
@@ -98,8 +118,8 @@ fn push_rect(msg: &mut Vec<u8>, x: u16, y: u16, w: u16, h: u16, encoding: i32) {
 
 /// Send a FramebufferUpdate. Waits briefly for a new frame, then sends only the changed row-band
 /// (the whole framebuffer on the first update). When the framebuffer resized and the client
-/// advertised DesktopSize (-223), prefix a DesktopSize pseudo-rect so it re-sizes; an empty update
-/// if nothing changed.
+/// advertised DesktopSize (-223), a DesktopSize pseudo-rect is prefixed so it re-sizes. An empty
+/// update is sent if nothing changed.
 pub(super) async fn send_update<S: AsyncWrite + Unpin>(
     sock: &mut S,
     shared: &SharedFb,
@@ -109,7 +129,6 @@ pub(super) async fn send_update<S: AsyncWrite + Unpin>(
     fmt: &PixelFormat,
     zlib: Option<&mut ZlibStream>,
 ) -> Result<()> {
-    // Wait up to ~1s for a new frame so idle clients don't busy-loop.
     let mut waited = 0;
     loop {
         if shared.lock().unwrap().generation != *last_gen {
@@ -124,7 +143,6 @@ pub(super) async fn send_update<S: AsyncWrite + Unpin>(
     }
 
     let update = {
-        // First update after connect must paint the whole screen; afterwards only the damage.
         let first = *last_gen == u64::MAX;
         let mut g = shared.lock().unwrap();
         *last_gen = g.generation;
@@ -134,20 +152,35 @@ pub(super) async fn send_update<S: AsyncWrite + Unpin>(
         if width == 0 || len == 0 {
             Update::Empty
         } else if desktopsize && (fw, fh) != *last_dims {
-            // Resolution changed: announce the new size and repaint the whole (new) frame.
             *last_dims = (fw, fh);
             g.take_dirty();
-            Update::Resize { w: fw, h: fh, pixels: g.fb.pixels.clone() }
+            Update::Resize {
+                w: fw,
+                h: fh,
+                pixels: g.fb.pixels.clone(),
+            }
         } else {
             let range = if first { None } else { g.take_dirty() };
             match range {
                 Some(r) if r.end > r.start && r.end <= len => {
                     let (y0, y1) = (r.start / width, (r.end - 1) / width);
                     let pixels = g.fb.pixels[y0 * width..(y1 + 1) * width].to_vec();
-                    Update::Rect { x: 0, y: y0 as u16, w: fw, h: (y1 - y0 + 1) as u16, pixels }
+                    Update::Rect {
+                        x: 0,
+                        y: y0 as u16,
+                        w: fw,
+                        h: (y1 - y0 + 1) as u16,
+                        pixels,
+                    }
                 }
-                // First update, or damage already consumed by another viewer: send full frame.
-                _ => Update::Rect { x: 0, y: 0, w: fw, h: fh, pixels: g.fb.pixels.clone() },
+                // Full frame on the first update, or when another viewer already drained the damage.
+                _ => Update::Rect {
+                    x: 0,
+                    y: 0,
+                    w: fw,
+                    h: fh,
+                    pixels: g.fb.pixels.clone(),
+                },
             }
         }
     };
@@ -177,7 +210,13 @@ pub(super) async fn send_update<S: AsyncWrite + Unpin>(
 /// Append a pixel rectangle: Raw, or Zlib (encoding 6) when the client's persistent zlib stream is
 /// present. Zlib is just the Raw pixel bytes deflated on a per-connection stream, which crushes the
 /// redundant console content.
-fn push_pixel_rect(msg: &mut Vec<u8>, (x, y, w, h): (u16, u16, u16, u16), pixels: &[u32], fmt: &PixelFormat, zlib: Option<&mut ZlibStream>) {
+fn push_pixel_rect(
+    msg: &mut Vec<u8>,
+    (x, y, w, h): (u16, u16, u16, u16),
+    pixels: &[u32],
+    fmt: &PixelFormat,
+    zlib: Option<&mut ZlibStream>,
+) {
     let mut raw = Vec::with_capacity(pixels.len() * (fmt.bpp as usize / 8).max(1));
     for &px in pixels {
         fmt.push(&mut raw, px);
@@ -200,7 +239,7 @@ fn push_pixel_rect(msg: &mut Vec<u8>, (x, y, w, h): (u16, u16, u16, u16), pixels
 /// Deflate `input` into `out` on the persistent `z` stream, sync-flushed so the client can inflate
 /// this rectangle now while keeping the stream context (dictionary) for the next one. A sync flush
 /// always emits a marker, so completion is detected by the flush leaving output room to spare
-/// (rather than by "no new output"); we reserve generously so that happens in one pass.
+/// (not by "no new output"). Reserve generously so that happens in one pass.
 fn deflate_sync(z: &mut ZlibStream, input: &[u8], out: &mut Vec<u8>) {
     let start = z.total_in();
     loop {
@@ -208,7 +247,8 @@ fn deflate_sync(z: &mut ZlibStream, input: &[u8], out: &mut Vec<u8>) {
         let consumed = (z.total_in() - start) as usize;
         let spare = out.capacity() - out.len();
         let before_out = z.total_out();
-        z.compress_vec(&input[consumed..], out, FlushCompress::Sync).expect("zlib deflate");
+        z.compress_vec(&input[consumed..], out, FlushCompress::Sync)
+            .expect("zlib deflate");
         let all_in = (z.total_in() - start) as usize >= input.len();
         let produced = (z.total_out() - before_out) as usize;
         if all_in && produced < spare {
@@ -228,7 +268,11 @@ mod tests {
         let mut dec = Decompress::new(true);
 
         // Each "rectangle" must decode against the shared, persistent inflate stream, in order.
-        for chunk in [&b"\x00\x00\x00\x00\xff\xff\xff\xff"[..], b"\x00\x00\x00\x00\xff\xff\xff\xfe", b"hello zlib hello zlib hello"] {
+        for chunk in [
+            &b"\x00\x00\x00\x00\xff\xff\xff\xff"[..],
+            b"\x00\x00\x00\x00\xff\xff\xff\xfe",
+            b"hello zlib hello zlib hello",
+        ] {
             let mut z = Vec::new();
             super::deflate_sync(&mut enc, chunk, &mut z);
             assert!(z.len() < chunk.len() + 16); // sanity: not wildly expanding
@@ -240,12 +284,16 @@ mod tests {
                     out.reserve(chunk.len() - out.len() + 8);
                 }
                 let consumed = (dec.total_in() - start) as usize;
-                dec.decompress_vec(&z[consumed..], &mut out, FlushDecompress::Sync).unwrap();
+                dec.decompress_vec(&z[consumed..], &mut out, FlushDecompress::Sync)
+                    .unwrap();
                 if (dec.total_in() - start) as usize >= z.len() && out.len() < chunk.len() {
                     break;
                 }
             }
-            assert_eq!(out, chunk, "each zlib rect must round-trip on the persistent stream");
+            assert_eq!(
+                out, chunk,
+                "each zlib rect must round-trip on the persistent stream"
+            );
         }
     }
 
@@ -274,7 +322,11 @@ mod tests {
 
         // Same format, big-endian byte order.
         let mut v = Vec::new();
-        PixelFormat { big_endian: true, ..f565 }.push(&mut v, 0xFF3366CC);
+        PixelFormat {
+            big_endian: true,
+            ..f565
+        }
+        .push(&mut v, 0xFF3366CC);
         assert_eq!(v, [0x33, 0x39]);
     }
 }

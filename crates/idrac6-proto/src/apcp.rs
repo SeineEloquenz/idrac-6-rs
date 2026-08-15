@@ -1,10 +1,6 @@
-//! APCP transport: the initial handshake and the post-handshake packet framing, from the
-//! decompiled applet (`com/avocent/kvm/b/l.java`, `com/avocent/kvm/b/a/b.java`).
-//!
-//! 1. A fixed 53-byte **handshake** right after TCP connect (magic `APCP`, big-endian).
-//!    The capability/redirect reply selects plaintext vs TLS; this firmware requires TLS.
-//! 2. After the TLS upgrade, **session packets** with an 8-byte header: magic `BEEF`
-//!    + type (u16 BE) + total length (u16 BE), followed by the body.
+//! APCP transport for the iDRAC 6 KVM channel. A fixed 53-byte `APCP` handshake right after TCP
+//! connect, then TLS-wrapped session packets with an 8-byte `BEEF` header (magic, u16 type, u16
+//! total-length, all big-endian) and a body.
 
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -17,36 +13,34 @@ pub(crate) const HANDSHAKE_LEN: usize = 53;
 pub(crate) const VER_MAJOR: u8 = 2;
 pub(crate) const VER_MINOR: u8 = 34;
 
-/// Connection kind sent in the handshake (`by` in the applet). `a()` -> 3, `b()` -> 4.
+/// Connection kind sent in the handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnKind {
     Primary = 3,
     Secondary = 4,
 }
 
-/// An APCP session-packet type, from the applet's dispatch table (`com/avocent/kvm/b/a/a.java`).
-/// Requests are low numbers; the appliance's replies carry the high bit (login 256 -> reply 257;
-/// video 128.. -> 34304..). The trailing comment is the applet's symbol. Unrecognized codes read
-/// back as `Other`.
+/// An APCP session-packet type. Requests are low numbers, replies carry the high bit. The trailing
+/// comment on a variant is the applet's symbol for it. Unrecognized codes read back as `Other`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PacketType {
-    FrameAck,         // cb, 0
-    Link,             // ac, 1
-    Login,            // 256
-    LoginReply,       // 257
-    LoginExt,         // 258
-    Keyboard,         // f, 512
-    Pointer,          // gc, 513
-    ResolutionAck,    // n, 769
-    SetResolution,    // x, 770
-    VideoStart,       // o, 772
-    VideoConfig,      // db, 782
-    Keepalive,        // p, 1024
-    VideoHb,          // hb, 0x0081
-    ConfigRequest,    // xb, 0x0084
-    ResolutionReport, // jb, 0x8201
-    LoginResponseAlt, // vb, 0x8300
-    LoginResponse,    // vb, 0x8305
+    FrameAck, // cb
+    Link,     // ac
+    Login,
+    LoginReply,
+    LoginExt,
+    Keyboard,         // f
+    Pointer,          // gc
+    ResolutionAck,    // n
+    SetResolution,    // x
+    VideoStart,       // o
+    VideoConfig,      // db
+    Keepalive,        // p
+    VideoHb,          // hb
+    ConfigRequest,    // xb
+    ResolutionReport, // jb
+    LoginResponseAlt, // vb
+    LoginResponse,    // vb
     Other(u16),
 }
 
@@ -100,37 +94,37 @@ impl PacketType {
     }
 }
 
-/// Media-channel flow-control window `W`: send a `cb` frame-ack after this many received video
-/// packets (per `r.B()`), or the appliance's send window drains and it goes quiet.
+/// Send a flow-control ack after this many received video packets.
 pub const FLOW_CONTROL_WINDOW: u8 = 20;
 
-/// After a successful login the applet requests video by sending three packets (`y()` in
-/// `com/avocent/kvm/b/r.java`): db(true), the client resolution, and o(). Only then does the
-/// appliance stream frames.
-pub async fn send_video_start<S: AsyncWrite + Unpin>(s: &mut S, width: u16, height: u16) -> Result<()> {
-    write_packet(s, PacketType::VideoConfig, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // db(true)
+/// Request video after login. The appliance streams frames only once it receives this sequence of
+/// config-enable, client resolution, and start.
+pub async fn send_video_start<S: AsyncWrite + Unpin>(
+    s: &mut S,
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    write_packet(s, PacketType::VideoConfig, &[1, 1, 0, 0, 0, 0, 0, 0]).await?; // enable
     let mut res = [0u8; 8];
     res[0..2].copy_from_slice(&width.to_be_bytes());
     res[2..4].copy_from_slice(&height.to_be_bytes());
-    write_packet(s, PacketType::SetResolution, &res).await?; // x(width, height)
-    write_packet(s, PacketType::VideoStart, &[0u8; 8]).await?; // o()
+    write_packet(s, PacketType::SetResolution, &res).await?;
+    write_packet(s, PacketType::VideoStart, &[0u8; 8]).await?;
     Ok(())
 }
 
-/// `n()` (type 769), sent once the appliance reports the screen resolution (`r.b()`).
+/// Acknowledge the appliance's reported screen resolution.
 pub async fn send_resolution_ack<S: AsyncWrite + Unpin>(s: &mut S) -> Result<()> {
     write_packet(s, PacketType::ResolutionAck, &[0u8; 8]).await
 }
 
-/// `cb` flow-control ack (type 0), sent on the MEDIA channel every W=20 received video
-/// packets, per `r.B()`. Byte 0 carries the count of frames since the last ack; without it
-/// the appliance's send window drains and it goes quiet (or a wrong-channel flood stalls it).
+/// Flow-control ack on the media channel, sent every [`FLOW_CONTROL_WINDOW`] video packets. Byte 0
+/// is the count since the last ack. Without it the appliance's send window drains and it goes quiet.
 pub async fn send_frame_ack<S: AsyncWrite + Unpin>(s: &mut S, count: u8) -> Result<()> {
     write_packet(s, PacketType::FrameAck, &[count, 0, 0, 0, 0, 0, 0, 0]).await
 }
 
-/// `ac` (type 1), sent on the second (media) channel to bind it to the authenticated session,
-/// carrying the login session id `c` (=`C`) and `d` (=`D`, 0 here). Both big-endian.
+/// Bind the media channel to the authenticated session, carrying the login session id (big-endian).
 pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Result<()> {
     let mut body = [0u8; 8];
     body[0..4].copy_from_slice(&c.to_be_bytes());
@@ -142,9 +136,12 @@ pub async fn send_link<S: AsyncWrite + Unpin>(s: &mut S, c: u32, d: u32) -> Resu
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
-/// Encode the 53-byte handshake request. `enc_pref` mirrors the applet's `h` field
-/// (1 = plaintext, 4 = TLS). `payload` is the 32-byte client nonce (padded/truncated).
-pub(crate) fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) -> [u8; HANDSHAKE_LEN] {
+/// Encode the 53-byte handshake request. `enc_pref` advertises capabilities (1 plaintext, 4 TLS, 5 both).
+pub(crate) fn encode_handshake(
+    kind: ConnKind,
+    enc_pref: u32,
+    payload: &[u8],
+) -> [u8; HANDSHAKE_LEN] {
     let mut buf = [0u8; HANDSHAKE_LEN];
     buf[0..4].copy_from_slice(MAGIC);
     buf[4..8].copy_from_slice(&(HANDSHAKE_LEN as u32).to_be_bytes());
@@ -164,7 +161,9 @@ pub(crate) fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) ->
 /// Read the 53-byte handshake reply, returning the redirect port (0 = none).
 async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<u16> {
     let mut buf = [0u8; HANDSHAKE_LEN];
-    s.read_exact(&mut buf).await.context("read handshake reply")?;
+    s.read_exact(&mut buf)
+        .await
+        .context("read handshake reply")?;
     if &buf[0..4] != MAGIC {
         bail!("bad handshake magic: {:02x?}", &buf[0..4]);
     }
@@ -181,14 +180,17 @@ async fn read_handshake<S: AsyncRead + Unpin>(s: &mut S) -> Result<u16> {
 /// advertise `enc=5` (plaintext- and TLS-capable), the appliance selects TLS, and we wrap the
 /// channel.
 pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<Box<dyn Stream>> {
-    let mut tcp = TcpStream::connect((host, port)).await.context("tcp connect")?;
+    let mut tcp = TcpStream::connect((host, port))
+        .await
+        .context("tcp connect")?;
     tcp.set_nodelay(true).ok();
 
     let nonce = random_nonce();
-    tcp.write_all(&encode_handshake(kind, 5, &nonce)).await.context("write handshake")?;
+    tcp.write_all(&encode_handshake(kind, 5, &nonce))
+        .await
+        .context("write handshake")?;
     let redirect_port = read_handshake(&mut tcp).await?;
 
-    // Some firmware redirects the media stream to another port; this one keeps 5900.
     let mut stream = tcp;
     if redirect_port != 0 && redirect_port != port {
         stream = TcpStream::connect((host, redirect_port))
@@ -201,8 +203,6 @@ pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<Box<d
     Ok(Box::new(tls))
 }
 
-/// One APCP session packet: an 8-byte `BEEF` header (magic + u16 type + u16 total-length,
-/// all big-endian) followed by a body. The length field counts header + body.
 pub(crate) const PKT_MAGIC: &[u8; 4] = b"BEEF";
 
 #[derive(Debug, Clone)]
@@ -211,8 +211,11 @@ pub struct Packet {
     pub body: Vec<u8>,
 }
 
-/// Write a packet: `BEEF` + type + (8 + body.len()) + body.
-pub async fn write_packet<S: AsyncWrite + Unpin>(s: &mut S, kind: PacketType, body: &[u8]) -> Result<()> {
+pub async fn write_packet<S: AsyncWrite + Unpin>(
+    s: &mut S,
+    kind: PacketType,
+    body: &[u8],
+) -> Result<()> {
     let total = (8 + body.len()) as u16;
     let mut frame = Vec::with_capacity(8 + body.len());
     frame.extend_from_slice(PKT_MAGIC);
@@ -224,9 +227,7 @@ pub async fn write_packet<S: AsyncWrite + Unpin>(s: &mut S, kind: PacketType, bo
     Ok(())
 }
 
-/// Read one packet. The type is at header offset 4, the total length at offset 6; the body
-/// is `len - 8` bytes. The magic is not required on inbound frames (the applet reads type
-/// and length positionally).
+/// Read one packet. Inbound frames are parsed positionally, so the `BEEF` magic is not validated.
 pub async fn read_packet<S: AsyncRead + Unpin>(s: &mut S) -> Result<Packet> {
     let mut hdr = [0u8; 8];
     s.read_exact(&mut hdr).await.context("read packet header")?;
@@ -237,7 +238,10 @@ pub async fn read_packet<S: AsyncRead + Unpin>(s: &mut S) -> Result<Packet> {
     }
     let mut body = vec![0u8; total - 8];
     s.read_exact(&mut body).await.context("read packet body")?;
-    Ok(Packet { kind: PacketType::from_code(code), body })
+    Ok(Packet {
+        kind: PacketType::from_code(code),
+        body,
+    })
 }
 
 fn random_nonce() -> [u8; 32] {
@@ -253,11 +257,23 @@ mod tests {
     #[test]
     fn known_types_round_trip_through_their_code() {
         for kind in [
-            PacketType::FrameAck, PacketType::Link, PacketType::Login, PacketType::LoginReply,
-            PacketType::LoginExt, PacketType::Keyboard, PacketType::Pointer, PacketType::ResolutionAck,
-            PacketType::SetResolution, PacketType::VideoStart, PacketType::VideoConfig,
-            PacketType::Keepalive, PacketType::VideoHb, PacketType::ConfigRequest,
-            PacketType::ResolutionReport, PacketType::LoginResponseAlt, PacketType::LoginResponse,
+            PacketType::FrameAck,
+            PacketType::Link,
+            PacketType::Login,
+            PacketType::LoginReply,
+            PacketType::LoginExt,
+            PacketType::Keyboard,
+            PacketType::Pointer,
+            PacketType::ResolutionAck,
+            PacketType::SetResolution,
+            PacketType::VideoStart,
+            PacketType::VideoConfig,
+            PacketType::Keepalive,
+            PacketType::VideoHb,
+            PacketType::ConfigRequest,
+            PacketType::ResolutionReport,
+            PacketType::LoginResponseAlt,
+            PacketType::LoginResponse,
         ] {
             assert_eq!(PacketType::from_code(kind.code()), kind);
         }

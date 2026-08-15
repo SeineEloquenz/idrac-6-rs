@@ -10,7 +10,10 @@ use idrac6_kvm::{server::rfb, session::kvm};
 use idrac6_proto::auth;
 
 #[derive(Parser)]
-#[command(name = "idrac6-kvm-serve", about = "iDRAC 6 KVM console as an RFB/VNC proxy")]
+#[command(
+    name = "idrac6-kvm-serve",
+    about = "iDRAC 6 KVM console as an RFB/VNC proxy"
+)]
 struct Cli {
     #[command(flatten)]
     conn: ConnArgs,
@@ -43,7 +46,10 @@ impl ConnArgs {
     async fn session(&self) -> Result<auth::Session> {
         let host = self.host.clone().context("--host/IDRAC_HOST required")?;
         let user = self.user.clone().unwrap_or_else(|| "root".into());
-        let password = self.password.clone().context("--password/IDRAC_PASSWORD required")?;
+        let password = self
+            .password
+            .clone()
+            .context("--password/IDRAC_PASSWORD required")?;
         info!(%host, %user, "web login to mint KVM token");
         let mut s = auth::login_and_get_token(&host, &user, &password).await?;
         if let Some(p) = self.video_port {
@@ -61,19 +67,19 @@ async fn main() -> Result<()> {
     idrac6_kvm::init_tracing();
     let cli = Cli::parse();
 
-    let listener = TcpListener::bind(&cli.listen).await.with_context(|| format!("bind {}", cli.listen))?;
+    let listener = TcpListener::bind(&cli.listen)
+        .await
+        .with_context(|| format!("bind {}", cli.listen))?;
 
     let s = cli.conn.session().await?;
-    // Keep the web-session handle for logout on shutdown (the KVM token is bound to it, so we
-    // must not log out while streaming).
+    // The KVM token is bound to this web session, so logging out mid-stream kills it. Hold the
+    // handle and release it only on shutdown.
     let (host, cookies, st1) = (s.host.clone(), s.web_cookies.clone(), s.web_st1.clone());
-    // Reconnect by re-minting a KVM token from the same web session.
     let user = cli.conn.user.clone().unwrap_or_else(|| "root".into());
     let refresh = kvm::refresh_from_web(host.clone(), user, cookies.clone(), st1.clone());
     let (shared, input, _task) = kvm::spawn(refresh, s);
     info!(listen = %cli.listen, "RFB server listening — point a VNC client here (Ctrl-C to stop)");
 
-    // Serve until the RFB loop ends or a shutdown signal arrives, then always clean up.
     let out = tokio::select! {
         r = rfb::serve(listener, shared, input) => r,
         _ = idrac6_kvm::shutdown_signal() => { info!("shutting down"); Ok(()) }
@@ -82,6 +88,6 @@ async fn main() -> Result<()> {
         info!("logging out iDRAC web session");
         let _ = auth::web_logout(&host, &cookies, st1.as_deref()).await;
     }
-    // Dropping here closes the KVM sockets, ending the appliance-side KVM session cleanly.
+    // Dropping the channels here ends the appliance-side KVM session cleanly.
     out
 }

@@ -8,9 +8,6 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
 
-      # Two binary crates in the workspace: `idrac6-kvm-serve` is the lean RFB/VNC proxy,
-      # `idrac6-kvm-web` is the self-serve noVNC app (axum/tower/serde). Each pulls only its own
-      # dependencies, so the serve build never sees axum.
       mkBin = pkgs: { pname, blurb }: pkgs.rustPlatform.buildRustPackage {
         inherit pname;
         version = "0.1.0";
@@ -36,9 +33,6 @@
           inherit serve web;
           default = web;
 
-          # OCI images built purely with nix (dockerTools). Listen addresses default to all
-          # interfaces for containers; `IDRAC_HOST`/`IDRAC_USER`/`IDRAC_PASSWORD` (and `IDRAC_LISTEN`)
-          # configure a running container, so no flags are baked into the entrypoint.
           serve-image = pkgs.dockerTools.buildLayeredImage {
             name = "idrac6-kvm-serve";
             tag = "latest";
@@ -67,14 +61,12 @@
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.system}.default}/bin/idrac6-kvm";
+          program = pkgs.lib.getExe self.packages.${pkgs.system}.default;
         };
       });
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          # pkg-config's setup hook adds buildInputs' .dev outputs to PKG_CONFIG_PATH,
-          # and stdenv provides `cc`, so openssl-sys links the nixpkgs OpenSSL cleanly.
           nativeBuildInputs = with pkgs; [
             pkg-config
             rustc
@@ -86,7 +78,6 @@
           buildInputs = [ pkgs.openssl ];
           env = {
             RUST_LOG = "idrac6_kvm=debug,info";
-            # Link the system (nixpkgs) OpenSSL rather than vendoring/building it.
             OPENSSL_NO_VENDOR = "1";
           };
         };

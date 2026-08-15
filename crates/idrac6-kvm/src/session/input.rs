@@ -11,8 +11,15 @@ use idrac6_proto::apcp;
 pub enum Input {
     /// Character-level key (RFB `KeyEvent`): mapped to a HID usage assuming a US guest layout,
     /// synthesizing Shift for characters a virtual keyboard sends without it.
-    Key { down: bool, keysym: u32 },
-    Pointer { buttons: u8, x: u16, y: u16 },
+    Key {
+        down: bool,
+        keysym: u32,
+    },
+    Pointer {
+        buttons: u8,
+        x: u16,
+        y: u16,
+    },
 }
 
 /// Keyboard modifier state carried across input events, so Shift synthesized for a shifted
@@ -25,7 +32,11 @@ pub(crate) struct Mods {
 /// Translate an RFB input event to its APCP packet (sent on the control channel).
 /// Keyboard = packet type 512 (`f`): [0, down?0:1, hidHi, hidLo, 0,0,0,0].
 /// Mouse    = packet type 513 (`gc`): [0, buttons, xHi, xLo, yHi, yLo, 0, 0], absolute coords.
-pub(crate) async fn send_input<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, ev: Input, mods: &mut Mods) -> Result<()> {
+pub(crate) async fn send_input<S: tokio::io::AsyncWrite + Unpin>(
+    s: &mut S,
+    ev: Input,
+    mods: &mut Mods,
+) -> Result<()> {
     match ev {
         Input::Key { down, keysym } => {
             if keysym == 0xFFE1 || keysym == 0xFFE2 {
@@ -34,7 +45,13 @@ pub(crate) async fn send_input<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, ev: 
             match keysym_to_hid(keysym) {
                 Some((hid, needs_shift)) => {
                     let synth = needs_shift && !mods.client_shift;
-                    debug!(down, keysym = format!("{keysym:#x}"), hid = format!("{hid:#x}"), synth, "key -> APCP 512");
+                    debug!(
+                        down,
+                        keysym = format!("{keysym:#x}"),
+                        hid = format!("{hid:#x}"),
+                        synth,
+                        "key -> APCP 512"
+                    );
                     if down {
                         if synth {
                             send_key_hid(s, true, 0xE1).await?; // Shift_L down
@@ -140,8 +157,21 @@ fn keysym_to_hid(ks: u32) -> Option<(u16, bool)> {
     Some(out)
 }
 
-async fn send_key_hid<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, down: bool, hid: u16) -> Result<()> {
-    let body = [0, if down { 0 } else { 1 }, (hid >> 8) as u8, hid as u8, 0, 0, 0, 0];
+async fn send_key_hid<S: tokio::io::AsyncWrite + Unpin>(
+    s: &mut S,
+    down: bool,
+    hid: u16,
+) -> Result<()> {
+    let body = [
+        0,
+        if down { 0 } else { 1 },
+        (hid >> 8) as u8,
+        hid as u8,
+        0,
+        0,
+        0,
+        0,
+    ];
     apcp::write_packet(s, apcp::PacketType::Keyboard, &body).await
 }
 
@@ -162,8 +192,26 @@ mod tests {
         let (mut w, mut r) = tokio::io::duplex(1024);
         let mut mods = Mods::default();
         // '!' press then release. Shift (0xE1) must wrap the '1' key (0x1E).
-        send_input(&mut w, Input::Key { down: true, keysym: 0x21 }, &mut mods).await.unwrap();
-        send_input(&mut w, Input::Key { down: false, keysym: 0x21 }, &mut mods).await.unwrap();
+        send_input(
+            &mut w,
+            Input::Key {
+                down: true,
+                keysym: 0x21,
+            },
+            &mut mods,
+        )
+        .await
+        .unwrap();
+        send_input(
+            &mut w,
+            Input::Key {
+                down: false,
+                keysym: 0x21,
+            },
+            &mut mods,
+        )
+        .await
+        .unwrap();
         let mut buf = [0u8; 64];
         r.read_exact(&mut buf).await.unwrap();
         assert_eq!(
@@ -177,12 +225,42 @@ mod tests {
         let (mut w, mut r) = tokio::io::duplex(1024);
         let mut mods = Mods::default();
         // Client presses Shift itself, then 'A' (0x41). No synthesized Shift should be added.
-        send_input(&mut w, Input::Key { down: true, keysym: 0xFFE1 }, &mut mods).await.unwrap();
-        send_input(&mut w, Input::Key { down: true, keysym: 0x41 }, &mut mods).await.unwrap();
-        send_input(&mut w, Input::Key { down: false, keysym: 0x41 }, &mut mods).await.unwrap();
+        send_input(
+            &mut w,
+            Input::Key {
+                down: true,
+                keysym: 0xFFE1,
+            },
+            &mut mods,
+        )
+        .await
+        .unwrap();
+        send_input(
+            &mut w,
+            Input::Key {
+                down: true,
+                keysym: 0x41,
+            },
+            &mut mods,
+        )
+        .await
+        .unwrap();
+        send_input(
+            &mut w,
+            Input::Key {
+                down: false,
+                keysym: 0x41,
+            },
+            &mut mods,
+        )
+        .await
+        .unwrap();
         let mut buf = [0u8; 48];
         r.read_exact(&mut buf).await.unwrap();
-        assert_eq!(key_events(&buf), vec![(true, 0xE1), (true, 0x04), (false, 0x04)]);
+        assert_eq!(
+            key_events(&buf),
+            vec![(true, 0xE1), (true, 0x04), (false, 0x04)]
+        );
     }
 
     #[test]

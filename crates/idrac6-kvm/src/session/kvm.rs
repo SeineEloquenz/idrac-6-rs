@@ -1,4 +1,4 @@
-//! Live KVM session: connect + authenticate, then decode the ch2 video stream into a shared
+//! Live KVM session. Connect and authenticate, then decode the ch2 video stream into a shared
 //! framebuffer while pumping frame requests and forwarding input.
 
 use std::future::Future;
@@ -11,11 +11,11 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use idrac6_proto::apcp::{self, ConnKind};
-use idrac6_proto::auth;
 use super::input::{send_input, Input, Mods};
 use crate::video::hb::HbReassembler;
 use crate::video::{decoder::Decoder, Framebuffer};
+use idrac6_proto::apcp::{self, ConnKind};
+use idrac6_proto::auth;
 
 /// Shared framebuffer with a generation counter bumped on every decoded frame and the union of
 /// changed pixel ranges (half-open linear indices) since a client last consumed them.
@@ -43,7 +43,11 @@ impl FbState {
 pub type SharedFb = Arc<Mutex<FbState>>;
 
 pub(crate) fn shared(width: u32, height: u32) -> SharedFb {
-    Arc::new(Mutex::new(FbState { fb: Framebuffer::new(width, height), generation: 0, dirty: None }))
+    Arc::new(Mutex::new(FbState {
+        fb: Framebuffer::new(width, height),
+        generation: 0,
+        dirty: None,
+    }))
 }
 
 /// The control-channel (ch1) write half, shared between the long-lived input task and each
@@ -54,14 +58,22 @@ type SharedWriter = Arc<tokio::sync::Mutex<Option<Ch1Writer>>>;
 /// Mints a fresh [`auth::Session`] for each (re)connect. The KVM token is one-time, so a reconnect
 /// needs a new one. A `BadCredentials`/`NoPrivilege` result stops the supervisor; anything else is
 /// retried with backoff.
-pub type Refresh = Box<dyn FnMut() -> Pin<Box<dyn Future<Output = Result<auth::Session, auth::AuthError>> + Send>> + Send>;
+pub type Refresh = Box<
+    dyn FnMut() -> Pin<Box<dyn Future<Output = Result<auth::Session, auth::AuthError>> + Send>>
+        + Send,
+>;
 
 const MAX_FAILS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Build a [`Refresh`] that re-mints a KVM token from a still-valid web session (cookies + ST1),
 /// reusing that one web session so reconnects don't leak sessions toward the appliance's limit.
-pub fn refresh_from_web(host: String, user: String, cookies: Vec<(String, String)>, st1: Option<String>) -> Refresh {
+pub fn refresh_from_web(
+    host: String,
+    user: String,
+    cookies: Vec<(String, String)>,
+    st1: Option<String>,
+) -> Refresh {
     Box::new(move || {
         let (host, user, cookies, st1) = (host.clone(), user.clone(), cookies.clone(), st1.clone());
         Box::pin(async move {
@@ -74,10 +86,15 @@ pub fn refresh_from_web(host: String, user: String, cookies: Vec<(String, String
     })
 }
 
-/// Supervise the KVM connection: keep `shared` + `input_rx` alive across reconnects, and on every
-/// drop re-mint a session and reconnect with exponential backoff. Input + keep-alive run on one
+/// Supervise the KVM connection, keeping `shared` + `input_rx` alive across reconnects and
+/// re-minting a session on every drop with exponential backoff. Input and keep-alive run on one
 /// long-lived task writing to whichever control channel is currently up.
-async fn supervise(mut refresh: Refresh, initial: auth::Session, shared: SharedFb, mut input_rx: mpsc::Receiver<Input>) {
+async fn supervise(
+    mut refresh: Refresh,
+    initial: auth::Session,
+    shared: SharedFb,
+    mut input_rx: mpsc::Receiver<Input>,
+) {
     let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(None));
 
     let w_io = writer.clone();
@@ -168,7 +185,6 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
 
     auth::await_login_ok(&mut rd1).await?;
     info!("login ok; opening media channel");
-    // Publish the control-channel writer so the input task can reach it.
     *writer.lock().await = Some(wr1);
 
     let mut ch2 = apcp::open_channel(&s.host, s.kvm_port, ConnKind::Secondary).await?;
@@ -192,8 +208,6 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
         }
     });
 
-    // Video loop: decode ch2 frames into the shared framebuffer, ack flow control on ch2, and
-    // drive the ch1 config reactions (through the shared control writer).
     let mut dec: Option<Decoder> = None;
     let mut reassembler = HbReassembler::default();
     let mut frames_decoded = 0u64;
@@ -219,7 +233,13 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
                 }
                 if let Some((res, payload)) = reassembler.push(&pkt.body) {
                     if res.width > 0 && res.height > 0 {
-                        decode_into_fb(shared, &mut dec, payload, res.width as u32, res.height as u32);
+                        decode_into_fb(
+                            shared,
+                            &mut dec,
+                            payload,
+                            res.width as u32,
+                            res.height as u32,
+                        );
                         frames_decoded += 1;
                         if frames_decoded.is_multiple_of(300) {
                             info!(frames_decoded, "video frames decoded");
@@ -255,7 +275,10 @@ fn decode_into_fb(shared: &SharedFb, dec: &mut Option<Decoder>, payload: &[u8], 
 
 /// Build the shared framebuffer and spawn the reconnect supervisor. Returns the framebuffer, an
 /// input sender, and the supervisor task handle (abort it to stop the session and reconnect loop).
-pub fn spawn(refresh: Refresh, initial: auth::Session) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
+pub fn spawn(
+    refresh: Refresh,
+    initial: auth::Session,
+) -> (SharedFb, mpsc::Sender<Input>, tokio::task::JoinHandle<()>) {
     let shared = shared(1024, 768);
     let (tx, rx) = mpsc::channel(256);
     let fb = shared.clone();
@@ -283,10 +306,14 @@ mod tests {
             web_cookies: vec![],
             web_st1: None,
         };
-        let refresh: Refresh = Box::new(|| Box::pin(async { Err(auth::AuthError::BadCredentials) }));
+        let refresh: Refresh =
+            Box::new(|| Box::pin(async { Err(auth::AuthError::BadCredentials) }));
         let (_tx, rx) = mpsc::channel(4);
-        tokio::time::timeout(Duration::from_secs(8), supervise(refresh, initial, shared(8, 8), rx))
-            .await
-            .expect("supervisor must terminate on a fatal refresh, not hang");
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            supervise(refresh, initial, shared(8, 8), rx),
+        )
+        .await
+        .expect("supervisor must terminate on a fatal refresh, not hang");
     }
 }
