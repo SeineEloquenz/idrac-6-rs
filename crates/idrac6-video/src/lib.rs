@@ -1,6 +1,7 @@
 //! Video decode: the iDRAC 6 `hb` (0x0081) RLE/RGB555 codec into an RGBA framebuffer.
 
 pub mod decoder;
+pub mod hb;
 
 /// RGBA framebuffer (row-major, `0xAARRGGBB`).
 pub struct Framebuffer {

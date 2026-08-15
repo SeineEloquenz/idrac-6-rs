@@ -172,16 +172,16 @@ fn decode_dump(a: DecodeArgs) -> Result<()> {
     let raw = std::fs::read(&a.input).with_context(|| format!("read {}", a.input.display()))?;
     let frames = reassemble(&raw);
     info!(reassembled = frames.len(), "frames");
-    let Some((_, _, first)) = frames.first() else {
+    let Some((res, first)) = frames.first() else {
         anyhow::bail!("no video frames in {}", a.input.display());
     };
-    let (w, h) = (frames[0].1 as u32, frames[0].0 as u32);
+    let (w, h) = (res.width as u32, res.height as u32);
     info!(width = w, height = h, first_frame_bytes = first.len(), "decoding");
 
     let mut fb = video::Framebuffer::new(w, h);
     let mut dec = video::decoder::Decoder::new(w, h);
     let n = if a.frames == 0 { frames.len() } else { a.frames.min(frames.len()) };
-    for (i, (_, _, payload)) in frames.iter().take(n).enumerate() {
+    for (i, (_, payload)) in frames.iter().take(n).enumerate() {
         let (ops, _) = dec.decode_frame(payload, &mut fb);
         info!(frame = i, bytes = payload.len(), ops, "decoded");
     }
@@ -330,11 +330,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
     out
 }
 
-/// Reassemble hb fragments from a capture dump into (height, width, payload) frames.
-fn reassemble(raw: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
+/// Reassemble hb fragments from a capture dump (repeated u32-LE length + body) into frames.
+fn reassemble(raw: &[u8]) -> Vec<(video::hb::Resolution, Vec<u8>)> {
     let mut frames = Vec::new();
-    let mut cur: Vec<u8> = Vec::new();
-    let mut dims = (0u16, 0u16);
+    let mut reassembler = video::hb::HbReassembler::default();
     let mut off = 0;
     while off + 4 <= raw.len() {
         let len = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
@@ -344,18 +343,8 @@ fn reassemble(raw: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
         }
         let body = &raw[off..off + len];
         off += len;
-        if body.len() < 12 || &body[0..4] != b"\xde\xad\xbe\xef" {
-            continue;
-        }
-        let h = u16::from_be_bytes([body[4], body[5]]);
-        let w = u16::from_be_bytes([body[6], body[7]]);
-        if body[8] & 1 != 0 {
-            cur.clear();
-            dims = (h, w);
-        }
-        cur.extend_from_slice(&body[12..]);
-        if body[8] & 2 != 0 {
-            frames.push((dims.0, dims.1, std::mem::take(&mut cur)));
+        if let Some((res, payload)) = reassembler.push(body) {
+            frames.push((res, payload.to_vec()));
         }
     }
     frames
@@ -365,12 +354,13 @@ fn reassemble(raw: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
 fn load_replay(path: &std::path::Path) -> Result<kvm::SharedFb> {
     let raw = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let frames = reassemble(&raw);
-    let (h, w, _) = *frames.first().context("no frames in dump")?;
-    let shared = kvm::shared(w as u32, h as u32);
-    let mut dec = video::decoder::Decoder::new(w as u32, h as u32);
+    let (res, _) = frames.first().context("no frames in dump")?;
+    let (w, h) = (res.width as u32, res.height as u32);
+    let shared = kvm::shared(w, h);
+    let mut dec = video::decoder::Decoder::new(w, h);
     {
         let mut g = shared.lock().unwrap();
-        for (_, _, payload) in &frames {
+        for (_, payload) in &frames {
             dec.decode_frame(payload, &mut g.fb);
         }
         g.generation = 1;

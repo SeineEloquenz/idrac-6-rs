@@ -13,6 +13,7 @@ use tracing::{info, warn};
 use crate::apcp::{self, ConnKind};
 use crate::auth;
 use crate::input::{send_input, Input, Mods};
+use crate::video::hb::HbReassembler;
 use crate::video::{decoder::Decoder, Framebuffer};
 
 /// Shared framebuffer with a generation counter bumped on every decoded frame and the union of
@@ -193,8 +194,7 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
     // Video loop: decode ch2 frames into the shared framebuffer, ack flow control on ch2, and
     // drive the ch1 config reactions (through the shared control writer).
     let mut dec: Option<Decoder> = None;
-    let mut frame: Vec<u8> = Vec::new();
-    let mut dims = (0u16, 0u16);
+    let mut reassembler = HbReassembler::default();
     let mut frames_decoded = 0u64;
     let mut hb_count = 0u32; // media packets since last flow-control ack
 
@@ -216,21 +216,13 @@ async fn connect_once(s: &auth::Session, shared: &SharedFb, writer: &SharedWrite
                     apcp::send_frame_ack(&mut wr2, hb_count as u8).await.ok();
                     hb_count = 0;
                 }
-                let b = &pkt.body;
-                if b.len() >= 12 && &b[0..4] == b"\xde\xad\xbe\xef" {
-                    let flags = b[8];
-                    if flags & 1 != 0 {
-                        frame.clear();
-                        dims = (u16::from_be_bytes([b[6], b[7]]), u16::from_be_bytes([b[4], b[5]]));
-                    }
-                    frame.extend_from_slice(&b[12..]);
-                    if flags & 2 != 0 && dims.0 > 0 && dims.1 > 0 {
-                        decode_into_fb(shared, &mut dec, &frame, dims.0 as u32, dims.1 as u32);
+                if let Some((res, payload)) = reassembler.push(&pkt.body) {
+                    if res.width > 0 && res.height > 0 {
+                        decode_into_fb(shared, &mut dec, payload, res.width as u32, res.height as u32);
                         frames_decoded += 1;
                         if frames_decoded.is_multiple_of(300) {
                             info!(frames_decoded, "video frames decoded");
                         }
-                        frame.clear();
                     }
                 }
             }
