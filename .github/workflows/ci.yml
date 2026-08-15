@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  nix:
+    uses: SeineEloquenz/ci/.github/workflows/nix-ci.yml@main
+    permissions:
+      contents: read
+      packages: write
+# TODO offer a docker image
+#    with:
+#      images: '["todo"]'
