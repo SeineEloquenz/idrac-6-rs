@@ -71,13 +71,19 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
     let mut last_gen = u64::MAX;
     let mut last_dims = (w, h); // size the client currently knows; DesktopSize keeps it in sync
     let mut desktopsize = false;
+    let mut pixfmt = PixelFormat::default();
     let mut ty = [0u8; 1];
     loop {
         sock.read_exact(&mut ty).await?;
         match ty[0] {
             0 => {
-                let mut b = [0u8; 19]; // SetPixelFormat
+                let mut b = [0u8; 19]; // SetPixelFormat: padding(3) + pixel-format(16)
                 sock.read_exact(&mut b).await?;
+                let fmt = PixelFormat::parse(&b[3..]);
+                // Honor true-colour 8/16/32bpp requests; ignore palette / odd bpp (keep default).
+                if fmt.true_colour && matches!(fmt.bpp, 8 | 16 | 32) {
+                    pixfmt = fmt;
+                }
             }
             2 => {
                 let mut b = [0u8; 3]; // SetEncodings: pad + count
@@ -93,7 +99,7 @@ async fn client_loop<S: AsyncRead + AsyncWrite + Unpin>(
             3 => {
                 let mut b = [0u8; 9]; // FramebufferUpdateRequest
                 sock.read_exact(&mut b).await?;
-                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize).await?;
+                send_update(sock, shared, &mut last_gen, &mut last_dims, desktopsize, &pixfmt).await?;
             }
             4 => {
                 let mut b = [0u8; 7]; // KeyEvent: down(1)+pad(2)+keysym(4)
@@ -186,6 +192,62 @@ fn server_init(w: u16, h: u16) -> Vec<u8> {
     v
 }
 
+/// The pixel layout the client wants for framebuffer data (from SetPixelFormat, else the
+/// ServerInit default of 32bpp little-endian with RGB in shifts 16/8/0).
+#[derive(Clone, Copy)]
+struct PixelFormat {
+    bpp: u8,
+    big_endian: bool,
+    true_colour: bool,
+    r_max: u16,
+    g_max: u16,
+    b_max: u16,
+    r_shift: u8,
+    g_shift: u8,
+    b_shift: u8,
+}
+
+impl Default for PixelFormat {
+    fn default() -> Self {
+        PixelFormat { bpp: 32, big_endian: false, true_colour: true, r_max: 255, g_max: 255, b_max: 255, r_shift: 16, g_shift: 8, b_shift: 0 }
+    }
+}
+
+impl PixelFormat {
+    /// Parse the 16-byte PixelFormat structure (bpp, depth, big-endian, true-colour, maxes, shifts).
+    fn parse(b: &[u8]) -> Self {
+        PixelFormat {
+            bpp: b[0],
+            big_endian: b[2] != 0,
+            true_colour: b[3] != 0,
+            r_max: u16::from_be_bytes([b[4], b[5]]),
+            g_max: u16::from_be_bytes([b[6], b[7]]),
+            b_max: u16::from_be_bytes([b[8], b[9]]),
+            r_shift: b[10],
+            g_shift: b[11],
+            b_shift: b[12],
+        }
+    }
+
+    /// Encode one `0xFFRRGGBB` pixel into this format and append its `bpp/8` bytes to `out`.
+    fn push(&self, out: &mut Vec<u8>, px: u32) {
+        let scale = |c: u32, max: u16| (c * max as u32 + 127) / 255;
+        let value = (scale((px >> 16) & 0xff, self.r_max) << self.r_shift)
+            | (scale((px >> 8) & 0xff, self.g_max) << self.g_shift)
+            | (scale(px & 0xff, self.b_max) << self.b_shift);
+        let n = (self.bpp as usize / 8).clamp(1, 4);
+        if self.big_endian {
+            for i in (0..n).rev() {
+                out.push((value >> (8 * i)) as u8);
+            }
+        } else {
+            for i in 0..n {
+                out.push((value >> (8 * i)) as u8);
+            }
+        }
+    }
+}
+
 /// A framebuffer update: nothing changed, a resolution change (DesktopSize + full frame), or one
 /// changed rectangle.
 enum Update {
@@ -213,6 +275,7 @@ async fn send_update<S: AsyncWrite + Unpin>(
     last_gen: &mut u64,
     last_dims: &mut (u16, u16),
     desktopsize: bool,
+    fmt: &PixelFormat,
 ) -> Result<()> {
     // Wait up to ~1s for a new frame so idle clients don't busy-loop.
     let mut waited = 0;
@@ -270,7 +333,7 @@ async fn send_update<S: AsyncWrite + Unpin>(
             push_rect(&mut msg, 0, 0, w, h, -223); // DesktopSize pseudo-rect
             push_rect(&mut msg, 0, 0, w, h, 0); // full Raw frame at the new size
             for px in &pixels {
-                msg.extend_from_slice(&px.to_le_bytes());
+                fmt.push(&mut msg, *px);
             }
         }
         Update::Rect { x, y, w, h, pixels } => {
@@ -279,7 +342,7 @@ async fn send_update<S: AsyncWrite + Unpin>(
             msg.extend_from_slice(&1u16.to_be_bytes());
             push_rect(&mut msg, x, y, w, h, 0); // Raw
             for px in &pixels {
-                msg.extend_from_slice(&px.to_le_bytes()); // 0xFFRRGGBB -> [B,G,R,FF]
+                fmt.push(&mut msg, *px); // 0xFFRRGGBB -> client pixel format
             }
         }
     }
@@ -289,9 +352,38 @@ async fn send_update<S: AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use super::{paste_keysym, serve_conn};
+    use super::{paste_keysym, serve_conn, PixelFormat};
     use crate::video::Framebuffer;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    #[test]
+    fn pixel_format_encodes_to_client_layout() {
+        // Default: 32bpp little-endian, RGB in shifts 16/8/0 -> [B, G, R, unused].
+        let mut v = Vec::new();
+        PixelFormat::default().push(&mut v, 0xFF3366CC);
+        assert_eq!(v, [0xCC, 0x66, 0x33, 0x00]);
+
+        // RGB565 little-endian: 0x3366CC -> 0x3339.
+        let f565 = PixelFormat {
+            bpp: 16,
+            big_endian: false,
+            true_colour: true,
+            r_max: 31,
+            g_max: 63,
+            b_max: 31,
+            r_shift: 11,
+            g_shift: 5,
+            b_shift: 0,
+        };
+        let mut v = Vec::new();
+        f565.push(&mut v, 0xFF3366CC);
+        assert_eq!(v, [0x39, 0x33]);
+
+        // Same format, big-endian byte order.
+        let mut v = Vec::new();
+        PixelFormat { big_endian: true, ..f565 }.push(&mut v, 0xFF3366CC);
+        assert_eq!(v, [0x33, 0x39]);
+    }
 
     #[test]
     fn paste_keysym_maps_printables_and_specials() {
