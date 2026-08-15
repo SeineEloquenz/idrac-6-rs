@@ -10,12 +10,12 @@ use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::tls;
+use crate::tls;
 
-pub const MAGIC: &[u8; 4] = b"APCP";
-pub const HANDSHAKE_LEN: usize = 53;
-pub const VER_MAJOR: u8 = 2;
-pub const VER_MINOR: u8 = 34;
+pub(crate) const MAGIC: &[u8; 4] = b"APCP";
+pub(crate) const HANDSHAKE_LEN: usize = 53;
+pub(crate) const VER_MAJOR: u8 = 2;
+pub(crate) const VER_MINOR: u8 = 34;
 
 /// Connection kind sent in the handshake (`by` in the applet). `a()` -> 3, `b()` -> 4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +144,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 /// Encode the 53-byte handshake request. `enc_pref` mirrors the applet's `h` field
 /// (1 = plaintext, 4 = TLS). `payload` is the 32-byte client nonce (padded/truncated).
-pub fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) -> [u8; HANDSHAKE_LEN] {
+pub(crate) fn encode_handshake(kind: ConnKind, enc_pref: u32, payload: &[u8]) -> [u8; HANDSHAKE_LEN] {
     let mut buf = [0u8; HANDSHAKE_LEN];
     buf[0..4].copy_from_slice(MAGIC);
     buf[4..8].copy_from_slice(&(HANDSHAKE_LEN as u32).to_be_bytes());
@@ -203,7 +203,7 @@ pub async fn open_channel(host: &str, port: u16, kind: ConnKind) -> Result<Box<d
 
 /// One APCP session packet: an 8-byte `BEEF` header (magic + u16 type + u16 total-length,
 /// all big-endian) followed by a body. The length field counts header + body.
-pub const PKT_MAGIC: &[u8; 4] = b"BEEF";
+pub(crate) const PKT_MAGIC: &[u8; 4] = b"BEEF";
 
 #[derive(Debug, Clone)]
 pub struct Packet {

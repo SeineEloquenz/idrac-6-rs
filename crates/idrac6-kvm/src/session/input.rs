@@ -4,7 +4,7 @@
 use anyhow::Result;
 use tracing::debug;
 
-use crate::appliance::apcp;
+use idrac6_proto::apcp;
 
 /// Input events from the RFB layer, translated to APCP on the KVM channel.
 #[derive(Debug, Clone, Copy)]

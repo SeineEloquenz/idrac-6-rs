@@ -2,7 +2,6 @@
 //! as RFB/VNC (native clients) or a self-serve noVNC web app. The `idrac6-kvm-serve` and
 //! `idrac6-kvm-web` binaries are thin CLIs over these modules.
 
-pub mod appliance;
 pub mod server;
 pub mod session;
 

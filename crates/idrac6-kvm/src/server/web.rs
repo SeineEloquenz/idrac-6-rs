@@ -27,7 +27,7 @@ use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 use super::rfb;
-use crate::appliance::auth;
+use idrac6_proto::auth;
 use crate::session::{input, kvm};
 
 const COOKIE: &str = "idrac6_session";

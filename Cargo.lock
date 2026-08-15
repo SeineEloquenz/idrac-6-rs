@@ -480,19 +480,30 @@ dependencies = [
  "axum",
  "clap",
  "flate2",
+ "idrac6-proto",
+ "idrac6-video",
+ "openssl",
+ "serde",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "idrac6-proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "form_urlencoded",
  "http-body-util",
  "hyper",
  "hyper-util",
- "idrac6-video",
  "openssl",
- "serde",
  "thiserror",
  "tokio",
  "tokio-openssl",
- "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "idrac6-proto"
+version = "0.1.0"
+edition = "2021"
+description = "iDRAC 6 appliance protocol client: APCP KVM transport, legacy TLS, and web-login token minting"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
+openssl = "0.10"
+tokio-openssl = "0.6"
+anyhow = "1"
+thiserror = "2"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tracing = "0.1"
+form_urlencoded = "1"

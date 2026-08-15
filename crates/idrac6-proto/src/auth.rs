@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-use super::{apcp, http};
+use crate::{apcp, http};
 
 /// Credentials + endpoint for a KVM session, plus the web-session handle (if minted via
 /// web login) so it can be released with [`web_logout`].
@@ -30,7 +30,7 @@ pub struct Session {
 
 /// Parse a `viewer.jnlp` into a session. Its `passwd` is the rotating one-time KVM token, not
 /// the account password.
-pub(crate) fn parse_jnlp(xml: &str) -> Result<Session> {
+pub fn parse_jnlp(xml: &str) -> Result<Session> {
     let mut args: HashMap<&str, &str> = HashMap::new();
     for chunk in xml.split("<argument>").skip(1) {
         let Some(end) = chunk.find("</argument>") else { continue };
@@ -109,7 +109,7 @@ pub(crate) async fn web_login(host: &str, user: &str, password: &str) -> Result<
 /// args `@`-joined inside literal parens, `/viewer.jnlp(<host>@0@<title>@<epoch_ms>@ST1=<token>)`,
 /// with the title form-encoded and the ST1 token authorizing the request (the cookie alone yields
 /// 401).
-pub(crate) async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st1: Option<&str>) -> Result<String> {
+pub async fn fetch_jnlp(host: &str, user: &str, cookies: &[(String, String)], st1: Option<&str>) -> Result<String> {
     let st1 = st1.context("no ST1 token from login; cannot authorize viewer.jnlp")?;
     let cookie_hdr = cookie_header(cookies);
     let epoch_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
@@ -182,7 +182,7 @@ fn push_len_field(out: &mut Vec<u8>, src: &[u8], width: usize) {
 /// Send the Login Request and return the random session id `C` it carried. `C` links the
 /// second (media) channel via the `ac` packet, so the caller must keep it. `extended`
 /// (protocol >= 2) adds the trailing `q` byte and uses packet type 258.
-pub(crate) async fn send_login<S: AsyncWrite + Unpin>(
+pub async fn send_login<S: AsyncWrite + Unpin>(
     s: &mut S,
     user: &str,
     password: &str,
@@ -197,7 +197,7 @@ pub(crate) async fn send_login<S: AsyncWrite + Unpin>(
 
 /// Read the control channel until the appliance's User Login Response arrives, returning once it
 /// reports success. Times out after 10s; a non-zero status byte is a rejection.
-pub(crate) async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
+pub async fn await_login_ok<R: AsyncRead + Unpin>(rd: &mut R) -> Result<()> {
     loop {
         let pkt = tokio::time::timeout(Duration::from_secs(10), apcp::read_packet(rd))
             .await

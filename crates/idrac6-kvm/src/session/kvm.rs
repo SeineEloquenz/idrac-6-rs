@@ -11,8 +11,8 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::appliance::apcp::{self, ConnKind};
-use crate::appliance::auth;
+use idrac6_proto::apcp::{self, ConnKind};
+use idrac6_proto::auth;
 use super::input::{send_input, Input, Mods};
 use crate::video::hb::HbReassembler;
 use crate::video::{decoder::Decoder, Framebuffer};
@@ -266,7 +266,7 @@ pub fn spawn(refresh: Refresh, initial: auth::Session) -> (SharedFb, mpsc::Sende
 #[cfg(test)]
 mod tests {
     use super::{shared, supervise, Refresh};
-    use crate::appliance::auth;
+    use idrac6_proto::auth;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
