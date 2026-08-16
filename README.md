@@ -30,7 +30,16 @@ nix build github:SeineEloquenz/idrac-6-rs#serve   # RFB/VNC proxy
 nix build github:SeineEloquenz/idrac-6-rs#web     # self-serve web console
 ```
 
-Container images are published to GHCR on every push to `main`.
+Prebuilt binaries for `x86_64-linux` and `aarch64-linux` are pushed to a
+[Cachix](https://cachix.org) binary cache
+
+```
+substituters = https://seineeloquenz.cachix.org
+trusted-public-keys = seineeloquenz.cachix.org-1:OmKY3kSYOO2k8x4ay0NMfA4Qp1hEQu6yHxV+zfTuDxI=
+```
+
+Container images are published to GHCR on every push to `main` as multi-arch manifests (`amd64` and
+`arm64`).
 
 The images bind `0.0.0.0` inside the container, so publish the port to localhost only (or a trusted
 interface) and never straight to a public one. See [Security](#security).

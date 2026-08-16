@@ -13,3 +13,4 @@ jobs:
       packages: write
     with:
       images: '["serve-image", "web-image"]'
+    secrets: inherit
