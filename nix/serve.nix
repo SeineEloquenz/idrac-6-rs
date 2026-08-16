@@ -1,5 +1,10 @@
 self:
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.services.idrac6-kvm-serve;
 in
@@ -9,8 +14,12 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.system}.serve;
-      defaultText = lib.literalExpression "idrac6-kvm.packages.\${system}.serve";
+      default = pkgs.callPackage ./package.nix {
+        pname = "idrac6-kvm-serve";
+        blurb = "(RFB/VNC proxy)";
+        src = self;
+      };
+      defaultText = lib.literalExpression "pkgs.callPackage \"\${idrac6-kvm}/nix/package.nix\" { pname = \"idrac6-kvm-serve\"; src = idrac6-kvm; }";
       description = "The idrac6-kvm package to run.";
     };
 
@@ -77,14 +86,22 @@ in
         ProtectHostname = true;
         ProtectProc = "invisible";
         ProcSubset = "pid";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+          "AF_NETLINK"
+        ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
         MemoryDenyWriteExecute = true;
         SystemCallArchitectures = "native";
-        SystemCallFilter = [ "@system-service" "~@privileged" ];
+        SystemCallFilter = [
+          "@system-service"
+          "~@privileged"
+        ];
         CapabilityBoundingSet = "";
         UMask = "0077";
       };

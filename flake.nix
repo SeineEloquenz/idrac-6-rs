@@ -3,31 +3,35 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
 
-      mkBin = pkgs: { pname, blurb }: pkgs.rustPlatform.buildRustPackage {
-        inherit pname;
-        version = "0.1.0";
-        src = self;
-        cargoLock.lockFile = ./Cargo.lock;
-        nativeBuildInputs = [ pkgs.pkg-config ];
-        buildInputs = [ pkgs.openssl ];
-        cargoBuildFlags = [ "-p" pname ];
-        cargoTestFlags = [ "-p" "idrac6-kvm" ];
-        meta = {
-          description = "Modern KVM console proxy for Dell iDRAC 6 " + blurb;
-          mainProgram = pname;
+      mkBin =
+        pkgs:
+        { pname, blurb }:
+        pkgs.callPackage ./nix/package.nix {
+          inherit pname blurb;
+          src = self;
         };
-      };
     in
     {
-      packages = forAllSystems (pkgs:
+      packages = forAllSystems (
+        pkgs:
         let
-          serve = mkBin pkgs { pname = "idrac6-kvm-serve"; blurb = "(RFB/VNC proxy)"; };
-          web = mkBin pkgs { pname = "idrac6-kvm-web"; blurb = "(self-serve noVNC web app)"; };
+          serve = mkBin pkgs {
+            pname = "idrac6-kvm-serve";
+            blurb = "(RFB/VNC proxy)";
+          };
+          web = mkBin pkgs {
+            pname = "idrac6-kvm-web";
+            blurb = "(self-serve noVNC web app)";
+          };
         in
         {
           inherit serve web;
@@ -39,7 +43,9 @@
             config = {
               Entrypoint = [ (pkgs.lib.getExe serve) ];
               Env = [ "IDRAC_LISTEN=0.0.0.0:5900" ];
-              ExposedPorts = { "5900/tcp" = { }; };
+              ExposedPorts = {
+                "5900/tcp" = { };
+              };
             };
           };
 
@@ -53,10 +59,13 @@
                 "IDRAC_LISTEN=0.0.0.0:8080"
                 "IDRAC_NOVNC_ROOT=${pkgs.novnc}/share/webapps/novnc"
               ];
-              ExposedPorts = { "8080/tcp" = { }; };
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
             };
           };
-        });
+        }
+      );
 
       apps = forAllSystems (pkgs: {
         default = {
@@ -86,7 +95,12 @@
       nixosModules = {
         serve = import ./nix/serve.nix self;
         web = import ./nix/web.nix self;
-        default = { imports = [ (import ./nix/serve.nix self) (import ./nix/web.nix self) ]; };
+        default = {
+          imports = [
+            (import ./nix/serve.nix self)
+            (import ./nix/web.nix self)
+          ];
+        };
       };
     };
 }
